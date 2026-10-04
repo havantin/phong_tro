@@ -1,0 +1,6 @@
+{
+  "name": "PhongTro Thai Nguyen - Tim Phong Thong Minh AI",
+  "description": "Nền tảng tìm kiếm phòng trọ thông minh tại Thái Nguyên tích hợp AI Chatbot gợi ý vị trí theo trường đại học, khu công nghiệp và tiện ích.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
