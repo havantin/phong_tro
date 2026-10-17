@@ -8,7 +8,7 @@ import {
   LocationItem,
   pool,
 } from '../db';
-import { executeAiRoomSearch } from '../aiService';
+import { executeAiRoomSearch, StructuredQuery } from '../aiService';
 import { estimateTravelTime } from '../../src/utils/travelEstimates';
 
 async function runRadiusTestSuite() {
@@ -164,10 +164,11 @@ async function runRadiusTestSuite() {
   console.log('\n--- TEST 9: AI Search với câu "Phòng dưới 2 triệu cách ICTU dưới 2km" ---');
   try {
     const aiResult = await executeAiRoomSearch('Phòng dưới 2 triệu cách ICTU dưới 2km');
-    console.log(`  AI trích xuất: max_price = ${aiResult.structured_query.max_price}, max_distance_km = ${aiResult.structured_query.max_distance_km}, near_location = ${aiResult.structured_query.near_location}`);
-    assert(aiResult.structured_query.near_location === 'ICTU', 'AI nhận diện chuẩn địa điểm là ICTU');
-    assert(aiResult.structured_query.max_price === 2000000, 'AI nhận diện chuẩn ngân sách dưới 2 triệu');
-    assert(aiResult.structured_query.max_distance_km === 2, 'AI nhận diện chuẩn khoảng cách dưới 2 km');
+    const sq = aiResult.structured_query as StructuredQuery;
+    console.log(`  AI trích xuất: max_price = ${sq.max_price}, max_distance_km = ${sq.max_distance_km}, near_location = ${sq.near_location}`);
+    assert(sq.near_location === 'ICTU', 'AI nhận diện chuẩn địa điểm là ICTU');
+    assert(sq.max_price === 2000000, 'AI nhận diện chuẩn ngân sách dưới 2 triệu');
+    assert(sq.max_distance_km === 2, 'AI nhận diện chuẩn khoảng cách dưới 2 km');
 
     const allAiRoomsValid = aiResult.rooms.every((r: any) => {
       const priceOk = r.price < 2000000;

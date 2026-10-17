@@ -955,6 +955,15 @@ export function generateArticulateVietnameseReply(
   return reply;
 }
 
+export function getGeminiApiKey(): string {
+  return (
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.GOOGLE_GENAI_API_KEY ||
+    ''
+  ).trim();
+}
+
 /**
  * Call Gemini API if available and key is valid, otherwise use the advanced fallback brain.
  */
@@ -962,7 +971,7 @@ export async function analyzeQueryWithGemini(
   text: string,
   existingContext: Partial<StructuredQuery> = {}
 ): Promise<StructuredQuery> {
-  const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+  const apiKey = getGeminiApiKey();
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
     return parseVietnameseQuery(text, existingContext);
   }
@@ -1086,7 +1095,7 @@ export async function callGeminiCascade(
   systemInstruction?: string,
   jsonSchema?: any
 ): Promise<string> {
-  const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+  const apiKey = getGeminiApiKey();
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
     throw new Error('No valid GEMINI_API_KEY provided');
   }
@@ -1174,7 +1183,7 @@ export async function generateConversationalGeminiReply(
   history: { role: 'user' | 'assistant'; content: string }[] = [],
   suggestRooms: (Room & { match_score?: number; distance_km?: number })[] = []
 ): Promise<string> {
-  const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+  const apiKey = getGeminiApiKey();
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
     return generateArticulateVietnameseReply(userText, structuredQuery, rooms, locationObj, suggestRooms);
   }

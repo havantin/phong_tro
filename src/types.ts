@@ -82,6 +82,7 @@ export interface Room {
   // Dynamically enriched fields
   distance_to_target?: number;
   distance_km?: number;
+  distances?: Array<{ location: LocationItem; distance_km: number }>;
   match_score?: number;
   score_breakdown?: Record<string, number>;
 }

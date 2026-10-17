@@ -84,6 +84,9 @@ export interface Room {
   image_items?: RoomImage[];
   created_at: string;
   updated_at: string;
+  location_verified?: boolean;
+  location_updated_at?: string;
+  distances?: Array<{ location: LocationItem; distance_km: number }>;
 }
 
 export interface Favorite {
@@ -167,17 +170,15 @@ export const db = {
   contacts: [] as ContactInquiry[],
 };
 
-const connString = process.env.DATABASE_URL;
-if (!connString) {
-  throw new Error('DATABASE_URL is missing. Please set DATABASE_URL in the .env file before starting the server.');
-}
+const connString = (process.env.DATABASE_URL || '').trim();
+const isLocalDb = !connString || connString.includes('localhost') || connString.includes('127.0.0.1');
 
 export const pool = new pg.Pool({
-  connectionString: connString,
-  max: 20,
+  connectionString: connString || undefined,
+  max: process.env.DB_POOL_MAX ? parseInt(process.env.DB_POOL_MAX, 10) : (process.env.VERCEL ? 3 : 10),
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
-  ssl: connString.includes('localhost') || connString.includes('127.0.0.1') ? false : { rejectUnauthorized: false },
+  ssl: isLocalDb ? false : { rejectUnauthorized: false },
 });
 
 pool.on('error', (err) => {
@@ -185,6 +186,10 @@ pool.on('error', (err) => {
 });
 
 export async function ensureDatabaseConnection(): Promise<void> {
+  if (!connString && !process.env.DATABASE_URL) {
+    throw new Error('DATABASE_URL is missing. Please set DATABASE_URL in Vercel Environment Variables or your .env file.');
+  }
+
   try {
     const result = await pool.query('SELECT NOW() AS now');
     console.log('✅ PostgreSQL connected successfully:', result.rows[0].now);

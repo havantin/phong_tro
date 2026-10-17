@@ -73,7 +73,83 @@ const upload = multer({
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
-// Serve local uploaded images statically
+// CORS configuration
+app.use((req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  next();
+});
+
+// Normalize request URL for Vercel Serverless Function rewrites
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (!req.url.startsWith('/api')) {
+    req.url = '/api' + (req.url.startsWith('/') ? req.url : '/' + req.url);
+  }
+  next();
+});
+
+// Lazy DB initialization ensuring PostgreSQL is connected before handling requests
+let dbInitPromise: Promise<void> | null = null;
+async function ensureDbReady() {
+  if (!dbInitPromise) {
+    dbInitPromise = ensureDatabaseConnection().catch((err) => {
+      console.error('[DB] ensureDatabaseConnection failed:', err);
+      dbInitPromise = null;
+      throw err;
+    });
+  }
+  return dbInitPromise;
+}
+
+app.use(async (req: Request, res: Response, next: NextFunction) => {
+  if (process.env.DATABASE_URL && req.url.startsWith('/api') && req.url !== '/api/health') {
+    try {
+      await ensureDbReady();
+    } catch (err: any) {
+      console.error('[DB] Connection error during request handling:', err?.message);
+    }
+  }
+  next();
+});
+
+// Health check endpoint
+app.get('/api/health', async (req: Request, res: Response) => {
+  try {
+    const isDbConfigured = Boolean(process.env.DATABASE_URL);
+    let dbConnected = false;
+    if (isDbConfigured) {
+      try {
+        await ensureDbReady();
+        dbConnected = true;
+      } catch (e) {
+        dbConnected = false;
+      }
+    }
+    const isStorageConfigured = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY);
+    const isAiConfigured = Boolean(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GENAI_API_KEY);
+
+    return res.json({
+      status: dbConnected ? 'healthy' : (isDbConfigured ? 'connecting' : 'no_database_url'),
+      app: 'PhongTro Thai Nguyen API',
+      scope: 'Tỉnh Thái Nguyên',
+      database: 'PostgreSQL (Supabase)',
+      db_connected: dbConnected,
+      storage_configured: isStorageConfigured,
+      ai_configured: isAiConfigured,
+      environment: process.env.NODE_ENV || 'production',
+      vercel: Boolean(process.env.VERCEL),
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    return res.status(500).json({ status: 'error', error: error?.message });
+  }
+});
+
+// Serve local uploaded images statically (fallback for local development)
 app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
 
 interface AuthRequest extends Request {

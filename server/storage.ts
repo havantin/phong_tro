@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
@@ -41,10 +42,16 @@ if (supabaseUrl && supabaseKey && supabaseKey.length > 10) {
   );
 }
 
-// Local upload directory fallback
-const LOCAL_UPLOAD_DIR = path.resolve(process.cwd(), 'uploads');
-if (!fs.existsSync(LOCAL_UPLOAD_DIR)) {
-  fs.mkdirSync(LOCAL_UPLOAD_DIR, { recursive: true });
+// Local upload directory fallback (safe for serverless and container runtimes)
+const LOCAL_UPLOAD_DIR = process.env.VERCEL
+  ? path.join(os.tmpdir(), 'phongtro_uploads')
+  : path.resolve(process.cwd(), 'uploads');
+try {
+  if (!fs.existsSync(LOCAL_UPLOAD_DIR)) {
+    fs.mkdirSync(LOCAL_UPLOAD_DIR, { recursive: true });
+  }
+} catch (e) {
+  // Ignored in read-only serverless filesystems
 }
 
 export function isSupabaseStorageConfigured(): boolean {
@@ -122,7 +129,14 @@ export async function uploadRoomImage(
     }
   }
 
-  // Fallback to local storage
+  // On Vercel, serverless lambdas cannot store persistent files locally
+  if (process.env.VERCEL) {
+    throw new Error(
+      'Hệ thống chưa kết nối Supabase Storage trên Vercel. Vui lòng thiết lập biến môi trường SUPABASE_SERVICE_ROLE_KEY và SUPABASE_URL trên Vercel để upload ảnh.'
+    );
+  }
+
+  // Fallback to local storage for local development
   const targetDir = path.join(LOCAL_UPLOAD_DIR, 'room-images', ownerId, roomId);
   fs.mkdirSync(targetDir, { recursive: true });
   const localFilePath = path.join(targetDir, uniqueFilename);
