@@ -9,6 +9,7 @@ import { ToastProvider } from './context/ToastContext';
 import { Navbar } from './components/Navbar';
 import { Footer } from './components/Footer';
 import { FloatingAiChat } from './components/FloatingAiChat';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { HomePage } from './pages/HomePage';
 import { RoomsPage } from './pages/RoomsPage';
 import { RoomDetailPage } from './pages/RoomDetailPage';
@@ -27,16 +28,18 @@ export default function App() {
             <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 selection:bg-emerald-500 selection:text-white font-sans">
               <Navbar />
               <main className="flex-1">
-                <Routes>
-                  <Route path="/" element={<HomePage />} />
-                  <Route path="/rooms" element={<RoomsPage />} />
-                  <Route path="/rooms/:id" element={<RoomDetailPage />} />
-                  <Route path="/ai-search" element={<AiSearchPage />} />
-                  <Route path="/compare" element={<ComparePage />} />
-                  <Route path="/favorites" element={<FavoritesPage />} />
-                  <Route path="/owner" element={<OwnerDashboard />} />
-                  <Route path="/admin" element={<AdminDashboard />} />
-                </Routes>
+                <ErrorBoundary>
+                  <Routes>
+                    <Route path="/" element={<HomePage />} />
+                    <Route path="/rooms" element={<RoomsPage />} />
+                    <Route path="/rooms/:id" element={<RoomDetailPage />} />
+                    <Route path="/ai-search" element={<AiSearchPage />} />
+                    <Route path="/compare" element={<ComparePage />} />
+                    <Route path="/favorites" element={<FavoritesPage />} />
+                    <Route path="/owner" element={<OwnerDashboard />} />
+                    <Route path="/admin" element={<AdminDashboard />} />
+                  </Routes>
+                </ErrorBoundary>
               </main>
               <Footer />
               {/* Global Floating AI Chatbot accessible on every page */}

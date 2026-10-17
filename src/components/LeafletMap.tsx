@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import { Room, LocationItem } from '../types';
+import { formatPriceVND } from '../utils/formatPrice';
 
 interface LeafletMapProps {
   rooms: Room[];
@@ -92,29 +93,29 @@ export const LeafletMap: React.FC<LeafletMapProps> = ({
       `);
 
       if (radiusKm && radiusKm > 0) {
-        circleRef.current = L.circle(locLatLng, {
+        const circle = L.circle(locLatLng, {
           radius: radiusKm * 1000,
-          color: '#8b5cf6',
+          color: '#7c3aed',
           fillColor: '#8b5cf6',
-          fillOpacity: 0.12,
+          fillOpacity: 0.14,
           weight: 2,
-          dashArray: '5, 8',
+          dashArray: '6, 8',
         }).addTo(map);
+        circleRef.current = circle;
+        bounds.extend(circle.getBounds());
       }
     }
 
     // 2. Draw Room markers
     rooms.forEach((room) => {
-      if (!room.latitude || !room.longitude) return;
+      if (!room.latitude || !room.longitude || isNaN(Number(room.latitude)) || isNaN(Number(room.longitude))) return;
+      if (Number(room.latitude) === 0 && Number(room.longitude) === 0) return;
 
-      const latLng: [number, number] = [room.latitude, room.longitude];
+      const latLng: [number, number] = [Number(room.latitude), Number(room.longitude)];
       bounds.extend(latLng);
 
       const isHighlighted = room.id === highlightedRoomId;
-      const priceText =
-        room.price >= 1000000
-          ? `${(room.price / 1000000).toLocaleString('vi-VN', { maximumFractionDigits: 1 })}tr`
-          : `${room.price / 1000}k`;
+      const priceText = formatPriceVND(room.price, { perMonth: false, compact: true });
 
       const roomIcon = L.divIcon({
         className: 'custom-room-marker',
@@ -131,13 +132,24 @@ export const LeafletMap: React.FC<LeafletMapProps> = ({
 
       const marker = L.marker(latLng, { icon: roomIcon }).addTo(markersLayer);
 
+      const distKm = room.distance_to_target ?? room.distance_km;
+      const distInfoHtml = distKm !== undefined
+        ? `<p style="font-size: 11px; font-weight: 700; color: #7c3aed; margin: 0 0 6px 0;">📍 ~${distKm.toFixed(1)} km đường chim bay ${selectedLocation ? `đến ${selectedLocation.short_name}` : ''}</p>`
+        : '';
+
+      const mapsDirUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(`${room.latitude},${room.longitude}`)}`;
+
       const popupHtml = `
-        <div style="font-family: inherit; max-width: 200px;">
-          <img src="${room.images[0]}" style="width: 100%; height: 90px; object-fit: cover; border-radius: 8px; margin-bottom: 6px;" />
+        <div style="font-family: inherit; max-width: 210px;">
+          <img src="${room.images[0]}" style="width: 100%; height: 95px; object-fit: cover; border-radius: 8px; margin-bottom: 6px;" />
           <h4 style="font-size: 12px; font-weight: 700; color: #1e293b; margin: 0 0 4px 0; line-height: 1.3;">${room.title}</h4>
-          <p style="font-size: 13px; font-weight: 800; color: #059669; margin: 0 0 4px 0;">${(room.price / 1000000).toFixed(1)} tr/tháng • ${room.area}m²</p>
-          <p style="font-size: 11px; color: #64748b; margin: 0 0 8px 0;">${room.ward}, Thái Nguyên</p>
-          <a href="/rooms/${room.id}" style="display: block; text-align: center; background: #059669; color: white; padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; text-decoration: none;">Xem chi tiết</a>
+          <p style="font-size: 13px; font-weight: 800; color: #059669; margin: 0 0 4px 0;">${formatPriceVND(room.price)} • ${room.area}m²</p>
+          ${distInfoHtml}
+          <p style="font-size: 11px; color: #64748b; margin: 0 0 8px 0;">${room.ward || ''}, Thái Nguyên</p>
+          <div style="display: flex; gap: 4px;">
+            <a href="/rooms/${room.id}" style="flex: 1; display: block; text-align: center; background: #059669; color: white; padding: 5px 6px; border-radius: 6px; font-size: 11px; font-weight: 700; text-decoration: none;">Xem chi tiết</a>
+            <a href="${mapsDirUrl}" target="_blank" rel="noopener noreferrer" style="flex: 1; display: block; text-align: center; background: #2563eb; color: white; padding: 5px 6px; border-radius: 6px; font-size: 11px; font-weight: 700; text-decoration: none;">Chỉ đường ↗</a>
+          </div>
         </div>
       `;
 
@@ -147,9 +159,9 @@ export const LeafletMap: React.FC<LeafletMapProps> = ({
       });
     });
 
-    // Fit bounds if we have points
-    if (bounds.isValid() && rooms.length > 0) {
-      map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
+    // Fit bounds if we have points or circle
+    if (bounds.isValid()) {
+      map.fitBounds(bounds, { padding: [40, 40], maxZoom: 15 });
     }
   }, [rooms, selectedLocation, radiusKm, highlightedRoomId]);
 

@@ -11,10 +11,12 @@ import {
   Unlock,
   Trash2,
   Filter,
+  Edit,
 } from 'lucide-react';
 import { api } from '../services/api';
 import { Room, User, Report } from '../types';
 import { useAuth } from '../context/AuthContext';
+import { RoomEditModal } from '../components/RoomEditModal';
 
 export const AdminDashboard: React.FC = () => {
   const { user } = useAuth();
@@ -24,6 +26,7 @@ export const AdminDashboard: React.FC = () => {
   const [reports, setReports] = useState<Report[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'overview' | 'rooms' | 'users' | 'reports'>('overview');
+  const [editingRoom, setEditingRoom] = useState<Room | null>(null);
 
   const fetchAdminData = async () => {
     try {
@@ -234,14 +237,22 @@ export const AdminDashboard: React.FC = () => {
                   <td className="p-3 text-right">
                     <div className="flex items-center justify-end gap-1.5">
                       <button
+                        onClick={() => setEditingRoom(room)}
+                        className="px-2 py-1 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-lg font-bold text-[11px] flex items-center gap-1 cursor-pointer"
+                        title="Chỉnh sửa bài đăng & Quản lý ảnh"
+                      >
+                        <Edit className="w-3 h-3" />
+                        Sửa
+                      </button>
+                      <button
                         onClick={() => handleUpdateRoomStatus(room.id, 'available')}
-                        className="px-2 py-1 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-lg font-bold text-[11px]"
+                        className="px-2 py-1 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-lg font-bold text-[11px] cursor-pointer"
                       >
                         Duyệt
                       </button>
                       <button
                         onClick={() => handleUpdateRoomStatus(room.id, 'hidden')}
-                        className="px-2 py-1 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-lg font-bold text-[11px]"
+                        className="px-2 py-1 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-lg font-bold text-[11px] cursor-pointer"
                       >
                         Ẩn
                       </button>
@@ -352,6 +363,19 @@ export const AdminDashboard: React.FC = () => {
             </tbody>
           </table>
         </div>
+      )}
+
+      {/* Admin Room Edit Modal */}
+      {editingRoom && (
+        <RoomEditModal
+          room={editingRoom}
+          isOpen={Boolean(editingRoom)}
+          onClose={() => setEditingRoom(null)}
+          onSaved={() => {
+            setEditingRoom(null);
+            fetchAdminData();
+          }}
+        />
       )}
     </div>
   );

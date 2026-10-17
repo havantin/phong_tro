@@ -1,4 +1,4 @@
-﻿import crypto from 'crypto';
+import crypto from 'crypto';
 import dotenv from 'dotenv';
 import pg from 'pg';
 
@@ -38,6 +38,17 @@ export interface Amenity {
   icon: string;
 }
 
+export interface RoomImage {
+  id: string;
+  room_id: string;
+  storage_path?: string;
+  image_url: string;
+  url?: string;
+  is_cover: boolean;
+  sort_order: number;
+  created_at: string;
+}
+
 export interface Room {
   id: string;
   owner_id: string;
@@ -70,6 +81,7 @@ export interface Room {
   contact_count: number;
   amenities: string[];
   images: string[];
+  image_items?: RoomImage[];
   created_at: string;
   updated_at: string;
 }
@@ -117,6 +129,9 @@ export interface ChatSession {
     room_type?: string;
     amenities?: string[];
     province?: string;
+    structured_query?: any;
+    last_rooms?: any[];
+    [key: string]: any;
   };
   messages: Array<{
     id: string;
@@ -173,6 +188,27 @@ export async function ensureDatabaseConnection(): Promise<void> {
   try {
     const result = await pool.query('SELECT NOW() AS now');
     console.log('✅ PostgreSQL connected successfully:', result.rows[0].now);
+
+    // Auto-migrate room_images columns if needed
+    try {
+      await pool.query(`
+        ALTER TABLE room_images ADD COLUMN IF NOT EXISTS storage_path VARCHAR(500);
+        ALTER TABLE room_images ADD COLUMN IF NOT EXISTS image_url VARCHAR(500);
+        ALTER TABLE room_images ADD COLUMN IF NOT EXISTS is_cover BOOLEAN DEFAULT false;
+        ALTER TABLE room_images ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 0;
+        UPDATE room_images SET image_url = url WHERE image_url IS NULL AND url IS NOT NULL;
+        UPDATE room_images SET is_cover = is_primary WHERE is_cover IS NULL AND is_primary IS NOT NULL;
+        UPDATE room_images SET url = image_url WHERE url IS NULL AND image_url IS NOT NULL;
+        UPDATE room_images SET is_primary = is_cover WHERE is_primary IS NULL AND is_cover IS NOT NULL;
+        ALTER TABLE rooms ALTER COLUMN latitude DROP NOT NULL;
+        ALTER TABLE rooms ALTER COLUMN longitude DROP NOT NULL;
+        ALTER TABLE rooms ADD COLUMN IF NOT EXISTS location_verified BOOLEAN DEFAULT false;
+        ALTER TABLE rooms ADD COLUMN IF NOT EXISTS location_updated_at TIMESTAMPTZ;
+      `);
+    } catch (migErr) {
+      console.warn('⚠️ Non-fatal migration notice for schema upgrade:', migErr);
+    }
+
     await refreshStaticData();
   } catch (error) {
     console.error('❌ PostgreSQL connection failed. Check DATABASE_URL and database availability.');
@@ -203,18 +239,61 @@ export async function refreshStaticData(): Promise<void> {
   }));
 }
 
-export function calculateHaversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+export function isValidCoordinate(lat?: number | null, lng?: number | null): boolean {
+  if (lat === undefined || lat === null || lng === undefined || lng === null) {
+    return false;
+  }
+  const nLat = Number(lat);
+  const nLng = Number(lng);
+  if (isNaN(nLat) || isNaN(nLng)) {
+    return false;
+  }
+  // Lat cannot be 0, Lng cannot be 0 (0,0 is Null Island in Gulf of Guinea)
+  if (nLat === 0 && nLng === 0) {
+    return false;
+  }
+  // Standard WGS84 range
+  if (nLat < -90 || nLat > 90 || nLng < -180 || nLng > 180) {
+    return false;
+  }
+  // Vietnam & Thai Nguyen bounds check (lat: 8..24, lng: 102..112)
+  // Rejects inverted lat/lng
+  if (nLat < 8 || nLat > 25 || nLng < 100 || nLng > 112) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Pure Haversine formula calculation:
+ * a = sin²(Δφ/2) + cos(φ1) × cos(φ2) × sin²(Δλ/2)
+ * d = 2R × atan2(√a, √(1−a))
+ * R = 6371 km
+ * Returns full precision distance in kilometers without rounding.
+ */
+export function calculateHaversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371; // Earth radius in km
+  const toRad = Math.PI / 180;
+  const phi1 = lat1 * toRad;
+  const phi2 = lat2 * toRad;
+  const deltaPhi = (lat2 - lat1) * toRad;
+  const deltaLambda = (lon2 - lon1) * toRad;
+
+  const sinHalfDeltaPhi = Math.sin(deltaPhi / 2);
+  const sinHalfDeltaLambda = Math.sin(deltaLambda / 2);
+
   const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return Number((R * c).toFixed(2));
+    sinHalfDeltaPhi * sinHalfDeltaPhi +
+    Math.cos(phi1) * Math.cos(phi2) * sinHalfDeltaLambda * sinHalfDeltaLambda;
+
+  const clampedA = Math.min(1, Math.max(0, a));
+  const c = 2 * Math.atan2(Math.sqrt(clampedA), Math.sqrt(1 - clampedA));
+
+  return R * c;
+}
+
+export function calculateHaversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  return calculateHaversineKm(lat1, lon1, lat2, lon2);
 }
 
 export function calculateMatchScore(
@@ -239,8 +318,12 @@ export function calculateMatchScore(
   let otherScore = 5;
   let dist: number | undefined = undefined;
 
-  if (locationObj) {
-    dist = calculateHaversineDistance(locationObj.latitude, locationObj.longitude, room.latitude, room.longitude);
+  if (
+    locationObj &&
+    isValidCoordinate(locationObj.latitude, locationObj.longitude) &&
+    isValidCoordinate(room.latitude, room.longitude)
+  ) {
+    dist = calculateHaversineKm(locationObj.latitude, locationObj.longitude, room.latitude, room.longitude);
     const maxDist = query.max_distance_km || 3;
     if (dist <= maxDist * 0.5) {
       distanceScore = 30;
@@ -251,6 +334,9 @@ export function calculateMatchScore(
     } else {
       distanceScore = 2;
     }
+  } else {
+    dist = undefined;
+    distanceScore = locationObj ? 0 : 20;
   }
 
   if (query.max_price) {
@@ -310,7 +396,13 @@ function toIsoDate(value: Date | string | null | undefined): string {
   return value ? new Date(value).toISOString() : new Date().toISOString();
 }
 
-function buildRoomFromRow(row: any, amenityCodes: string[] = [], images: string[] = []): Room {
+function buildRoomFromRow(
+  row: any,
+  amenityCodes: string[] = [],
+  imagesData: { urls: string[]; items: RoomImage[] } | string[] = { urls: [], items: [] }
+): Room {
+  const images = Array.isArray(imagesData) ? imagesData : imagesData.urls || [];
+  const imageItems = Array.isArray(imagesData) ? undefined : imagesData.items || [];
   return {
     id: row.id,
     owner_id: row.owner_id,
@@ -329,8 +421,8 @@ function buildRoomFromRow(row: any, amenityCodes: string[] = [], images: string[
     ward: row.ward,
     street: row.street || '',
     address: row.address,
-    latitude: Number(row.latitude),
-    longitude: Number(row.longitude),
+    latitude: row.latitude !== null && row.latitude !== undefined && row.latitude !== '' && !isNaN(Number(row.latitude)) ? Number(row.latitude) : (null as any),
+    longitude: row.longitude !== null && row.longitude !== undefined && row.longitude !== '' && !isNaN(Number(row.longitude)) ? Number(row.longitude) : (null as any),
     max_people: Number(row.max_people || 2),
     gender_requirement: row.gender_requirement || 'all',
     deposit: Number(row.deposit || 0),
@@ -343,8 +435,11 @@ function buildRoomFromRow(row: any, amenityCodes: string[] = [], images: string[
     contact_count: Number(row.contact_count || 0),
     amenities: Array.isArray(amenityCodes) ? amenityCodes : [],
     images: Array.isArray(images) ? images : [],
+    image_items: imageItems,
     created_at: toIsoDate(row.created_at),
     updated_at: toIsoDate(row.updated_at),
+    location_verified: row.location_verified === true,
+    location_updated_at: row.location_updated_at ? toIsoDate(row.location_updated_at) : undefined,
   };
 }
 
@@ -469,28 +564,73 @@ async function getRoomAmenityCodes(roomIds: string[]): Promise<Map<string, strin
   return map;
 }
 
-async function getRoomImages(roomIds: string[]): Promise<Map<string, string[]>> {
+async function getRoomImages(roomIds: string[]): Promise<Map<string, { urls: string[]; items: RoomImage[] }>> {
   if (!roomIds.length) return new Map();
   const { rows } = await pool.query(
-    `SELECT room_id, url FROM room_images WHERE room_id = ANY($1) ORDER BY created_at ASC`,
+    `SELECT * FROM room_images 
+     WHERE room_id = ANY($1) 
+     ORDER BY COALESCE(is_cover, is_primary, false) DESC, COALESCE(sort_order, 0) ASC, created_at ASC`,
     [roomIds]
   );
-  const map = new Map<string, string[]>();
+  const map = new Map<string, { urls: string[]; items: RoomImage[] }>();
   for (const row of rows) {
-    if (!map.has(row.room_id)) map.set(row.room_id, []);
-    map.get(row.room_id)!.push(row.url);
+    if (!map.has(row.room_id)) map.set(row.room_id, { urls: [], items: [] });
+    const imgUrl = row.image_url || row.url;
+    const isCover = Boolean(row.is_cover ?? row.is_primary ?? false);
+    const item: RoomImage = {
+      id: row.id,
+      room_id: row.room_id,
+      storage_path: row.storage_path || '',
+      image_url: imgUrl,
+      url: imgUrl,
+      is_cover: isCover,
+      sort_order: Number(row.sort_order || 0),
+      created_at: toIsoDate(row.created_at),
+    };
+    map.get(row.room_id)!.items.push(item);
+    map.get(row.room_id)!.urls.push(imgUrl);
   }
   return map;
 }
 
-export async function listRoomsForSearch(): Promise<Room[]> {
-  const { rows } = await pool.query(
-    `SELECT r.*, u.full_name AS owner_name, u.phone AS owner_phone, u.avatar AS owner_avatar
-     FROM rooms r
-     LEFT JOIN users u ON u.id = r.owner_id
-     WHERE r.province = 'Thái Nguyên' AND (r.status = 'available' OR r.status = 'pending')
-     ORDER BY r.created_at DESC`
-  );
+export interface RoomSearchFilters {
+  max_price?: number;
+  min_price?: number;
+  strict_max?: boolean;
+  strict_min?: boolean;
+  room_type?: string;
+}
+
+export async function listRoomsForSearch(filters?: RoomSearchFilters): Promise<Room[]> {
+  const conditions: string[] = ["r.province = 'Thái Nguyên'", "(r.status = 'available' OR r.status = 'pending')"];
+  const params: any[] = [];
+
+  if (filters?.max_price !== undefined && !isNaN(filters.max_price)) {
+    params.push(Math.round(filters.max_price));
+    const op = filters.strict_max ? '<' : '<=';
+    conditions.push(`r.price ${op} $${params.length}`);
+  }
+
+  if (filters?.min_price !== undefined && !isNaN(filters.min_price)) {
+    params.push(Math.round(filters.min_price));
+    const op = filters.strict_min ? '>' : '>=';
+    conditions.push(`r.price ${op} $${params.length}`);
+  }
+
+  if (filters?.room_type) {
+    params.push(filters.room_type);
+    conditions.push(`r.room_type = $${params.length}`);
+  }
+
+  const queryText = `
+    SELECT r.*, u.full_name AS owner_name, u.phone AS owner_phone, u.avatar AS owner_avatar
+    FROM rooms r
+    LEFT JOIN users u ON u.id = r.owner_id
+    WHERE ${conditions.join(' AND ')}
+    ORDER BY r.created_at DESC
+  `;
+
+  const { rows } = await pool.query(queryText, params);
   const roomIds = rows.map((row) => row.id);
 
   const [amenityMap, imageMap] = await Promise.all([
@@ -574,8 +714,8 @@ export async function createRoom(input: Partial<Room> & { owner_id: string; titl
       input.ward || 'Xã Quyết Thắng',
       input.street || '',
       input.address,
-      Number(input.latitude ?? 21.5855),
-      Number(input.longitude ?? 105.8066),
+      isValidCoordinate(input.latitude, input.longitude) ? Number(input.latitude) : null,
+      isValidCoordinate(input.latitude, input.longitude) ? Number(input.longitude) : null,
       Number(input.max_people ?? 2),
       input.gender_requirement || 'all',
       Number(input.deposit ?? 0),
@@ -602,10 +742,17 @@ export async function createRoom(input: Partial<Room> & { owner_id: string; titl
     }
   }
 
-  const images = Array.isArray(input.images) && input.images.length > 0 ? input.images : ['https://images.unsplash.com/photo-1522771739844-6a9f6d5f14af?w=800'];
+  const images = Array.isArray(input.images) && input.images.length > 0 ? input.images : [];
   if (images.length) {
-    const imageValues = images.map((image) => `('${id}-${crypto.randomUUID()}', '${id}', '${image.replace(/'/g, "''")}', ${image === images[0] ? true : false}, NOW())`).join(', ');
-    await pool.query(`INSERT INTO room_images (id, room_id, url, is_primary, created_at) VALUES ${imageValues}`);
+    for (let i = 0; i < images.length; i++) {
+      const img = images[i];
+      const isCover = i === 0;
+      await pool.query(
+        `INSERT INTO room_images (id, room_id, url, image_url, storage_path, is_primary, is_cover, sort_order, created_at)
+         VALUES ($1, $2, $3, $3, '', $4, $4, $5, NOW())`,
+        [`${id}-${crypto.randomUUID().slice(0, 8)}`, id, img, isCover, i]
+      );
+    }
   }
 
   return (await getRoomById(id)) as Room;
@@ -653,8 +800,8 @@ export async function updateRoom(roomId: string, updates: Partial<Room> & { amen
       next.ward,
       next.street || '',
       next.address,
-      Number(next.latitude),
-      Number(next.longitude),
+      isValidCoordinate(next.latitude, next.longitude) ? Number(next.latitude) : null,
+      isValidCoordinate(next.latitude, next.longitude) ? Number(next.longitude) : null,
       Number(next.max_people || 2),
       next.gender_requirement || 'all',
       Number(next.deposit || 0),
@@ -678,16 +825,164 @@ export async function updateRoom(roomId: string, updates: Partial<Room> & { amen
     }
   }
 
-  if (updates.images) {
+  if (updates.images !== undefined) {
     const images = updates.images ?? [];
     await pool.query('DELETE FROM room_images WHERE room_id = $1', [roomId]);
-    const imageValues = images.map((image) => `('${roomId}-${crypto.randomUUID()}', '${roomId}', '${image.replace(/'/g, "''")}', ${image === images[0] ? true : false}, NOW())`).join(', ');
-    if (imageValues) {
-      await pool.query(`INSERT INTO room_images (id, room_id, url, is_primary, created_at) VALUES ${imageValues}`);
+    for (let i = 0; i < images.length; i++) {
+      const img = images[i];
+      const isCover = i === 0;
+      await pool.query(
+        `INSERT INTO room_images (id, room_id, url, image_url, storage_path, is_primary, is_cover, sort_order, created_at)
+         VALUES ($1, $2, $3, $3, '', $4, $4, $5, NOW())`,
+        [`${roomId}-${crypto.randomUUID().slice(0, 8)}`, roomId, img, isCover, i]
+      );
     }
   }
 
   return (await getRoomById(roomId)) as Room;
+}
+
+export async function updateRoomLocation(
+  roomId: string,
+  latitude: number | null,
+  longitude: number | null,
+  verified = true
+): Promise<Room | null> {
+  await pool.query(
+    `UPDATE rooms SET
+      latitude = $2,
+      longitude = $3,
+      location_verified = $4,
+      location_updated_at = NOW(),
+      updated_at = NOW()
+     WHERE id = $1`,
+    [roomId, latitude, longitude, verified]
+  );
+  return getRoomById(roomId);
+}
+
+export async function getRoomImagesByRoom(roomId: string): Promise<RoomImage[]> {
+  const { rows } = await pool.query(
+    `SELECT * FROM room_images 
+     WHERE room_id = $1 
+     ORDER BY COALESCE(is_cover, is_primary, false) DESC, COALESCE(sort_order, 0) ASC, created_at ASC`,
+    [roomId]
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    room_id: row.room_id,
+    storage_path: row.storage_path || '',
+    image_url: row.image_url || row.url,
+    url: row.image_url || row.url,
+    is_cover: Boolean(row.is_cover ?? row.is_primary ?? false),
+    sort_order: Number(row.sort_order || 0),
+    created_at: toIsoDate(row.created_at),
+  }));
+}
+
+export async function addRoomImage(input: {
+  room_id: string;
+  image_url: string;
+  storage_path?: string;
+  is_cover?: boolean;
+  sort_order?: number;
+}): Promise<RoomImage> {
+  const id = `img-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+
+  const { rows: existingRows } = await pool.query(
+    'SELECT count(*) as count FROM room_images WHERE room_id = $1',
+    [input.room_id]
+  );
+  const count = parseInt(existingRows[0]?.count || '0', 10);
+  const isCover = input.is_cover !== undefined ? input.is_cover : count === 0;
+  const sortOrder = input.sort_order !== undefined ? input.sort_order : count;
+
+  if (isCover) {
+    await pool.query(
+      'UPDATE room_images SET is_cover = false, is_primary = false WHERE room_id = $1',
+      [input.room_id]
+    );
+  }
+
+  const { rows } = await pool.query(
+    `INSERT INTO room_images (
+       id, room_id, url, image_url, storage_path, is_primary, is_cover, sort_order, created_at
+     ) VALUES (
+       $1, $2, $3, $3, $4, $5, $5, $6, NOW()
+     ) RETURNING *`,
+    [id, input.room_id, input.image_url, input.storage_path || '', isCover, sortOrder]
+  );
+
+  const row = rows[0];
+  return {
+    id: row.id,
+    room_id: row.room_id,
+    storage_path: row.storage_path || '',
+    image_url: row.image_url || row.url,
+    url: row.image_url || row.url,
+    is_cover: Boolean(row.is_cover ?? row.is_primary ?? false),
+    sort_order: Number(row.sort_order || 0),
+    created_at: toIsoDate(row.created_at),
+  };
+}
+
+export async function deleteRoomImage(
+  imageId: string,
+  roomId: string
+): Promise<{ success: boolean; storage_path?: string }> {
+  const { rows: imgRows } = await pool.query(
+    'SELECT * FROM room_images WHERE id = $1 AND room_id = $2 LIMIT 1',
+    [imageId, roomId]
+  );
+  if (!imgRows[0]) {
+    return { success: false };
+  }
+
+  const image = imgRows[0];
+  const storagePath = image.storage_path || '';
+  const wasCover = Boolean(image.is_cover ?? image.is_primary ?? false);
+
+  await pool.query('DELETE FROM room_images WHERE id = $1 AND room_id = $2', [imageId, roomId]);
+
+  if (wasCover) {
+    const { rows: nextImg } = await pool.query(
+      `SELECT id FROM room_images 
+       WHERE room_id = $1 
+       ORDER BY COALESCE(sort_order, 0) ASC, created_at ASC 
+       LIMIT 1`,
+      [roomId]
+    );
+    if (nextImg[0]) {
+      await pool.query(
+        'UPDATE room_images SET is_cover = true, is_primary = true WHERE id = $1',
+        [nextImg[0].id]
+      );
+    }
+  }
+
+  return { success: true, storage_path: storagePath };
+}
+
+export async function reorderRoomImages(roomId: string, imageIds: string[]): Promise<RoomImage[]> {
+  for (let i = 0; i < imageIds.length; i++) {
+    await pool.query(
+      'UPDATE room_images SET sort_order = $1 WHERE id = $2 AND room_id = $3',
+      [i, imageIds[i], roomId]
+    );
+  }
+  return getRoomImagesByRoom(roomId);
+}
+
+export async function setRoomCoverImage(roomId: string, imageId: string): Promise<RoomImage[]> {
+  await pool.query(
+    'UPDATE room_images SET is_cover = false, is_primary = false WHERE room_id = $1',
+    [roomId]
+  );
+  await pool.query(
+    'UPDATE room_images SET is_cover = true, is_primary = true, sort_order = 0 WHERE id = $1 AND room_id = $2',
+    [imageId, roomId]
+  );
+  return getRoomImagesByRoom(roomId);
 }
 
 export async function deleteRoom(roomId: string): Promise<boolean> {
@@ -965,6 +1260,11 @@ export async function getChatMessages(sessionId: string): Promise<any[]> {
     matched_rooms: row.matched_rooms_json ? JSON.parse(row.matched_rooms_json) : undefined,
     created_at: new Date(row.created_at).toISOString(),
   }));
+}
+
+export async function clearChatSession(sessionId: string): Promise<void> {
+  await pool.query('DELETE FROM chat_messages WHERE session_id = $1', [sessionId]);
+  await pool.query('DELETE FROM chat_sessions WHERE id = $1', [sessionId]);
 }
 
 export async function hasDatabase(): Promise<boolean> {

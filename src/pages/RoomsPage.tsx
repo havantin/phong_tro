@@ -62,38 +62,71 @@ export const RoomsPage: React.FC = () => {
     loadMeta();
   }, []);
 
-  // Fetch rooms based on filters
+  // Fetch rooms based on filters with AbortController and URL synchronization
   useEffect(() => {
+    const controller = new AbortController();
+    let isCancelled = false;
+
     async function fetchRooms() {
       setLoading(true);
       try {
         const params: Record<string, any> = {
           page,
-          limit: viewMode === 'map' ? 30 : 9,
+          limit: viewMode === 'map' ? 100 : 9,
           sort,
         };
 
         if (keyword.trim()) params.keyword = keyword.trim();
-        if (nearLocation) params.near_location = nearLocation;
-        if (radius) params.radius = radius;
+        if (nearLocation) {
+          params.near_location = nearLocation;
+          params.radius = radius;
+        }
         if (roomType) params.room_type = roomType;
         if (minPrice) params.min_price = minPrice;
         if (maxPrice) params.max_price = maxPrice;
         if (minArea) params.min_area = minArea;
         if (selectedAmenities.length > 0) params.amenities = selectedAmenities.join(',');
 
-        const res = await api.getRooms(params);
-        setRooms(res.data);
-        setTotal(res.meta.total);
-        setTotalPages(res.meta.totalPages);
-        setTargetLocationObj(res.target_location || null);
-      } catch (err) {
-        console.error(err);
+        const res = await api.getRooms(params, controller.signal);
+        if (!isCancelled) {
+          setRooms(res.data);
+          setTotal(res.meta.total);
+          setTotalPages(res.meta.totalPages);
+          setTargetLocationObj(res.target_location || null);
+        }
+      } catch (err: any) {
+        if (err.name !== 'AbortError' && !isCancelled) {
+          console.error(err);
+        }
       } finally {
-        setLoading(false);
+        if (!isCancelled) {
+          setLoading(false);
+        }
       }
     }
+
     fetchRooms();
+
+    // Synchronize searchParams into URL
+    const nextParams: Record<string, string> = {};
+    if (keyword.trim()) nextParams.keyword = keyword.trim();
+    if (nearLocation) {
+      nextParams.near_location = nearLocation;
+      nextParams.radius = String(radius);
+    }
+    if (roomType) nextParams.room_type = roomType;
+    if (minPrice) nextParams.min_price = minPrice;
+    if (maxPrice) nextParams.max_price = maxPrice;
+    if (minArea) nextParams.min_area = minArea;
+    if (sort !== 'newest') nextParams.sort = sort;
+    if (page > 1) nextParams.page = String(page);
+    if (selectedAmenities.length > 0) nextParams.amenities = selectedAmenities.join(',');
+    setSearchParams(nextParams, { replace: true });
+
+    return () => {
+      isCancelled = true;
+      controller.abort();
+    };
   }, [keyword, nearLocation, radius, roomType, minPrice, maxPrice, minArea, selectedAmenities, sort, page, viewMode]);
 
   const toggleAmenity = (code: string) => {
@@ -128,7 +161,17 @@ export const RoomsPage: React.FC = () => {
             Tìm phòng trọ tại Thái Nguyên
           </h1>
           <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-            Tìm thấy <strong className="text-emerald-700 font-bold">{total}</strong> phòng trọ phù hợp tiêu chí
+            {nearLocation && targetLocationObj ? (
+              <span>
+                Tìm thấy <strong className="text-emerald-700 font-bold">{total}</strong> phòng trọ trong bán kính{' '}
+                <strong className="text-purple-700 font-bold">{radius === 0.5 ? '500m' : `${radius} km`}</strong> (đường chim bay) quanh{' '}
+                <strong>{targetLocationObj.short_name}</strong>
+              </span>
+            ) : (
+              <span>
+                Tìm thấy <strong className="text-emerald-700 font-bold">{total}</strong> phòng trọ phù hợp tiêu chí
+              </span>
+            )}
           </p>
         </div>
 
@@ -269,11 +312,35 @@ export const RoomsPage: React.FC = () => {
 
           {/* Radius selector if location selected */}
           {nearLocation && (
-            <div className="p-3 bg-purple-50/70 border border-purple-100 rounded-2xl space-y-2">
-              <div className="flex items-center justify-between text-xs font-bold text-purple-900">
-                <span>Bán kính tìm kiếm:</span>
-                <span className="text-purple-700 font-extrabold">{radius} km</span>
+            <div className="p-3.5 bg-purple-50/80 border border-purple-200 rounded-2xl space-y-2.5">
+              <div className="flex items-center justify-between text-xs font-bold text-purple-950">
+                <span>Bán kính (đường chim bay):</span>
+                <span className="text-purple-700 font-extrabold bg-purple-100 px-2 py-0.5 rounded-lg border border-purple-200">
+                  {radius === 0.5 ? '500m (0,5 km)' : `${radius} km`}
+                </span>
               </div>
+
+              {/* Quick Select Buttons for 500m, 1km, 2km, 3km, 5km */}
+              <div className="grid grid-cols-5 gap-1">
+                {[0.5, 1, 2, 3, 5].map((val) => (
+                  <button
+                    key={val}
+                    type="button"
+                    onClick={() => {
+                      setRadius(val);
+                      setPage(1);
+                    }}
+                    className={`py-1 text-[11px] font-bold rounded-lg border transition ${
+                      radius === val
+                        ? 'bg-purple-600 text-white border-purple-600 shadow-xs'
+                        : 'bg-white text-purple-800 border-purple-200 hover:bg-purple-100/70'
+                    }`}
+                  >
+                    {val === 0.5 ? '500m' : `${val}km`}
+                  </button>
+                ))}
+              </div>
+
               <input
                 type="range"
                 min="0.5"
@@ -284,10 +351,10 @@ export const RoomsPage: React.FC = () => {
                   setRadius(parseFloat(e.target.value));
                   setPage(1);
                 }}
-                className="w-full accent-purple-600"
+                className="w-full accent-purple-600 cursor-pointer"
               />
-              <div className="flex justify-between text-[10px] text-purple-600">
-                <span>500m</span>
+              <div className="flex justify-between text-[10px] font-medium text-purple-600 px-0.5">
+                <span>0.5km</span>
                 <span>1km</span>
                 <span>2km</span>
                 <span>3km</span>
@@ -381,7 +448,7 @@ export const RoomsPage: React.FC = () => {
                 </div>
                 <div>
                   <h4 className="text-xs sm:text-sm font-extrabold text-purple-950">
-                    Đang tính khoảng cách đến: {targetLocationObj.short_name} ({targetLocationObj.name})
+                    Đang lọc phòng trong bán kính {radius === 0.5 ? '500m' : `${radius} km`} (đường chim bay) quanh: {targetLocationObj.short_name} ({targetLocationObj.name})
                   </h4>
                   <p className="text-[11px] text-purple-700">{targetLocationObj.address}</p>
                 </div>

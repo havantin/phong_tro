@@ -19,12 +19,15 @@ import {
   ChevronRight,
   ThumbsUp,
   AlertCircle,
+  Lightbulb,
 } from 'lucide-react';
 import { api } from '../services/api';
 import { Room, StructuredQuery, LocationItem } from '../types';
 import { RoomCard } from '../components/RoomCard';
 import { LeafletMap } from '../components/LeafletMap';
+import { AiMarkdownRenderer } from '../components/AiMarkdownRenderer';
 import { useToast } from '../context/ToastContext';
+import { formatPriceVND } from '../utils/formatPrice';
 
 export const AiSearchPage: React.FC = () => {
   const [searchParams] = useSearchParams();
@@ -43,6 +46,7 @@ export const AiSearchPage: React.FC = () => {
   const [structuredQuery, setStructuredQuery] = useState<StructuredQuery | null>(null);
   const [replyText, setReplyText] = useState<string>('');
   const [matchedRooms, setMatchedRooms] = useState<Room[]>([]);
+  const [suggestRooms, setSuggestRooms] = useState<Room[]>([]);
   const [locationInfo, setLocationInfo] = useState<LocationItem | null>(null);
   const [activeTab, setActiveTab] = useState<'rooms' | 'map' | 'json'>('rooms');
   const [conversationHistory, setConversationHistory] = useState<
@@ -130,6 +134,9 @@ export const AiSearchPage: React.FC = () => {
     if (!text.trim() || loading) return;
 
     setLoading(true);
+    setMatchedRooms([]);
+    setSuggestRooms([]);
+    setReplyText('');
     setReasoningStep('AI đang phân tích ngôn ngữ tự nhiên tiếng Việt & phân loại ý định...');
     setConversationHistory((prev) => [...prev, { role: 'user', text }]);
 
@@ -142,17 +149,23 @@ export const AiSearchPage: React.FC = () => {
     }, 700);
 
     try {
-      const res = await api.sendAiChat(text, sessionId);
-      setSessionId(res.session_id);
+      const res = await api.searchAi(text);
       setStructuredQuery(res.structured_query);
       setReplyText(res.reply_text);
-      setMatchedRooms(res.rooms);
+      setMatchedRooms(res.rooms || []);
+      setSuggestRooms((res as any).suggest_rooms || []);
       setLocationInfo(res.location_info || null);
       setConversationHistory((prev) => [
         ...prev,
         { role: 'assistant', text: res.reply_text, query: res.structured_query },
       ]);
-      showToast(`Đã chọn lọc ${res.rooms.length} phòng trọ phù hợp nhất`, 'success');
+      if (res.rooms && res.rooms.length > 0) {
+        showToast(`Đã lọc được ${res.rooms.length} phòng phù hợp đúng ngân sách`, 'success');
+      } else if ((res as any).suggest_rooms && (res as any).suggest_rooms.length > 0) {
+        showToast(`Không có phòng trong ngân sách — gợi ý ${(res as any).suggest_rooms.length} phòng gần nhất`, 'info');
+      } else {
+        showToast('Chưa tìm thấy phòng phù hợp, thử mở rộng điều kiện tìm kiếm', 'info');
+      }
     } catch (err: any) {
       console.error(err);
       setReplyText(
@@ -183,6 +196,7 @@ export const AiSearchPage: React.FC = () => {
     setStructuredQuery(null);
     setReplyText('');
     setMatchedRooms([]);
+    setSuggestRooms([]);
     setLocationInfo(null);
     setConversationHistory([]);
     setInput('');
@@ -353,8 +367,8 @@ export const AiSearchPage: React.FC = () => {
               </div>
             </div>
 
-            <div className="text-sm text-slate-800 leading-relaxed whitespace-pre-line bg-white/70 p-4 rounded-xl border border-purple-100/80">
-              {replyText}
+            <div className="text-sm text-slate-800 leading-relaxed bg-white/80 p-4 sm:p-5 rounded-xl border border-purple-100/90 shadow-2xs">
+              <AiMarkdownRenderer content={replyText} />
             </div>
 
             {/* Quick Follow-up Action Chips */}
@@ -497,7 +511,9 @@ export const AiSearchPage: React.FC = () => {
                   : 'bg-white hover:bg-slate-100 text-slate-700 border border-slate-200'
               }`}
             >
-              <span>Danh sách phòng ({matchedRooms.length})</span>
+              <span>
+                Danh sách phòng ({matchedRooms.length > 0 ? matchedRooms.length : (suggestRooms.length > 0 ? `${suggestRooms.length} gợi ý` : 0)})
+              </span>
             </button>
             <button
               onClick={() => setActiveTab('map')}
@@ -543,6 +559,28 @@ export const AiSearchPage: React.FC = () => {
                     targetLocationName={locationInfo ? locationInfo.short_name : 'trường học'}
                   />
                 ))}
+              </div>
+            ) : suggestRooms.length > 0 ? (
+              <div className="space-y-6">
+                <div className="p-4 sm:p-5 rounded-2xl bg-amber-50/90 border border-amber-200/90 text-amber-900 shadow-2xs space-y-1">
+                  <div className="flex items-center gap-2 font-bold text-sm text-amber-800">
+                    <Lightbulb className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>Hiện không có phòng trong mức ngân sách bạn yêu cầu</span>
+                  </div>
+                  <p className="text-xs text-amber-700 leading-relaxed">
+                    Dưới đây là các lựa chọn có mức giá thấp nhất, gần nhất với khả năng tài chính của bạn tại Thái Nguyên:
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {suggestRooms.map((room) => (
+                    <RoomCard
+                      key={room.id}
+                      room={room}
+                      targetLocationName={locationInfo ? locationInfo.short_name : 'trường học'}
+                    />
+                  ))}
+                </div>
               </div>
             ) : (
               <div className="bg-white p-12 text-center rounded-3xl border border-slate-200 space-y-4">

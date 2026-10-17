@@ -21,6 +21,13 @@ import {
   Footprints,
   Bike,
   Navigation,
+  Edit,
+  ChevronLeft,
+  ChevronRight,
+  X,
+  Copy,
+  ExternalLink,
+  CheckCircle2,
 } from 'lucide-react';
 import { api } from '../services/api';
 import { Room, Review } from '../types';
@@ -31,6 +38,8 @@ import { LeafletMap } from '../components/LeafletMap';
 import { ContactModal } from '../components/ContactModal';
 import { ReportModal } from '../components/ReportModal';
 import { RoomCard } from '../components/RoomCard';
+import { RoomEditModal } from '../components/RoomEditModal';
+import { RoomLocationPicker } from '../components/RoomLocationPicker';
 import { estimateTravelTime } from '../utils/travelEstimates';
 
 export const RoomDetailPage: React.FC = () => {
@@ -42,10 +51,16 @@ export const RoomDetailPage: React.FC = () => {
 
   const [room, setRoom] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [selectedImage, setSelectedImage] = useState<string>('');
   const [isFavorite, setIsFavorite] = useState(false);
   const [contactModalOpen, setContactModalOpen] = useState(false);
   const [reportModalOpen, setReportModalOpen] = useState(false);
+  const [editModalOpen, setEditModalOpen] = useState(false);
+
+  // Lightbox modal states
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [lightboxIndex, setLightboxIndex] = useState(0);
 
   // Cost calculator states
   const [calcElectricityKwh, setCalcElectricityKwh] = useState(80);
@@ -57,49 +72,126 @@ export const RoomDetailPage: React.FC = () => {
   const [comment, setComment] = useState('');
   const [submittingReview, setSubmittingReview] = useState(false);
 
-  useEffect(() => {
-    async function loadRoom() {
-      if (!id) return;
-      setLoading(true);
-      try {
-        const data = await api.getRoomDetail(id);
-        setRoom(data);
-        if (data.images && data.images.length > 0) {
-          setSelectedImage(data.images[0]);
-        }
-      } catch (err) {
-        console.error(err);
-      } finally {
-        setLoading(false);
-      }
+  // GPS Location states
+  const [locationModalOpen, setLocationModalOpen] = useState(false);
+  const [pendingCoords, setPendingCoords] = useState<{ latitude: number | null; longitude: number | null }>({
+    latitude: null,
+    longitude: null,
+  });
+  const [savingLocation, setSavingLocation] = useState(false);
+  const [copiedCoords, setCopiedCoords] = useState(false);
+
+  const handleCopyCoords = () => {
+    if (!room?.latitude || !room?.longitude) return;
+    const text = `${room.latitude}, ${room.longitude}`;
+    navigator.clipboard.writeText(text);
+    setCopiedCoords(true);
+    showToast(`Đã sao chép tọa độ: ${text}`, 'success');
+    setTimeout(() => setCopiedCoords(false), 2500);
+  };
+
+  const handleOpenDirections = () => {
+    if (!room?.latitude || !room?.longitude) return;
+    const url = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(`${room.latitude},${room.longitude}`)}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
+  const handleOpenGoogleMaps = () => {
+    if (!room?.latitude || !room?.longitude) return;
+    const url = `https://www.google.com/maps?q=${encodeURIComponent(`${room.latitude},${room.longitude}`)}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
+  const handleOpenLocationEditor = () => {
+    setPendingCoords({
+      latitude: room?.latitude ?? null,
+      longitude: room?.longitude ?? null,
+    });
+    setLocationModalOpen(true);
+  };
+
+  const handleSaveLocation = async () => {
+    if (!room) return;
+    try {
+      setSavingLocation(true);
+      const updated = await api.updateRoomLocation(room.id, pendingCoords);
+      setRoom((prev: any) => ({
+        ...prev,
+        latitude: updated.latitude,
+        longitude: updated.longitude,
+        location_verified: updated.location_verified,
+        location_updated_at: updated.location_updated_at,
+        distances: updated.distances || prev.distances,
+      }));
+      setLocationModalOpen(false);
+      showToast(
+        pendingCoords.latitude && pendingCoords.longitude
+          ? 'Đã cập nhật vị trí GPS phòng trọ thành công!'
+          : 'Đã gỡ vị trí GPS của phòng trọ!',
+        'success'
+      );
+    } catch (err: any) {
+      showToast(err.message || 'Lỗi cập nhật vị trí', 'error');
+    } finally {
+      setSavingLocation(false);
     }
+  };
+
+  const loadRoom = async () => {
+    if (!id) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api.getRoomDetail(id);
+      setRoom(data);
+      if (data && data.images && data.images.length > 0) {
+        setSelectedImage(data.images[0]);
+      }
+    } catch (err: any) {
+      console.error('[RoomDetailPage] Error loading room detail:', err);
+      setError(err?.message || 'Không thể tải dữ liệu phòng trọ.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
     loadRoom();
   }, [id]);
 
-  if (loading) {
-    return (
-      <div className="max-w-7xl mx-auto px-4 py-20 text-center">
-        <div className="w-12 h-12 border-4 border-emerald-600 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-        <p className="text-slate-600 text-sm font-semibold">Đang tải thông tin phòng trọ...</p>
-      </div>
-    );
-  }
+  const displayImages: string[] = room && room.images && room.images.length > 0
+    ? room.images
+    : ['https://images.unsplash.com/photo-1522771739844-6a9f6d5f14af?w=800'];
 
-  if (!room) {
-    return (
-      <div className="max-w-7xl mx-auto px-4 py-20 text-center space-y-4">
-        <h2 className="text-2xl font-bold text-slate-800">Không tìm thấy phòng trọ</h2>
-        <p className="text-slate-500 text-sm">Phòng trọ này có thể đã được gỡ hoặc không tồn tại.</p>
-        <Link to="/rooms" className="px-4 py-2 bg-emerald-600 text-white rounded-xl text-sm font-bold inline-block">
-          Quay lại danh sách phòng
-        </Link>
-      </div>
-    );
-  }
+  const openLightbox = (index: number) => {
+    setLightboxIndex(index >= 0 ? index : 0);
+    setLightboxOpen(true);
+  };
 
-  const inCompare = isInCompare(room.id);
+  const nextLightboxImage = () => {
+    setLightboxIndex((prev) => (prev + 1) % displayImages.length);
+  };
+
+  const prevLightboxImage = () => {
+    setLightboxIndex((prev) => (prev - 1 + displayImages.length) % displayImages.length);
+  };
+
+  // Keyboard navigation for lightbox - must be defined before any returns to satisfy Rules of Hooks
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!lightboxOpen) return;
+      if (e.key === 'Escape') setLightboxOpen(false);
+      if (e.key === 'ArrowRight') nextLightboxImage();
+      if (e.key === 'ArrowLeft') prevLightboxImage();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [lightboxOpen, displayImages.length]);
+
+  const inCompare = room ? isInCompare(room.id) : false;
 
   const handleToggleFavorite = async () => {
+    if (!room) return;
     if (!user) {
       showToast('Vui lòng đăng nhập để lưu phòng trọ yêu thích!', 'info');
       return;
@@ -115,6 +207,7 @@ export const RoomDetailPage: React.FC = () => {
   };
 
   const handleToggleCompare = () => {
+    if (!room) return;
     if (inCompare) {
       removeFromCompare(room.id);
       showToast('Đã xóa khỏi danh sách so sánh', 'info');
@@ -133,6 +226,7 @@ export const RoomDetailPage: React.FC = () => {
 
   const handleReviewSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!room) return;
     if (!user) {
       showToast('Vui lòng đăng nhập để gửi đánh giá phòng!', 'info');
       return;
@@ -144,7 +238,7 @@ export const RoomDetailPage: React.FC = () => {
       const newRev = await api.submitReview(room.id, rating, comment);
       setRoom((prev: any) => ({
         ...prev,
-        reviews: [newRev, ...(prev.reviews || [])],
+        reviews: [newRev, ...(prev?.reviews || [])],
       }));
       setComment('');
       showToast('Cảm ơn bạn đã gửi đánh giá phòng trọ!', 'success');
@@ -156,24 +250,96 @@ export const RoomDetailPage: React.FC = () => {
   };
 
   const formatPrice = (p: number) => {
+    if (typeof p !== 'number' || isNaN(p)) return 'Liên hệ';
     if (p >= 1000000) {
       return `${(p / 1000000).toLocaleString('vi-VN', { maximumFractionDigits: 1 })} triệu/tháng`;
     }
     return `${p.toLocaleString('vi-VN')} đ/tháng`;
   };
 
-  // Calculator computations
-  const totalElec = calcElectricityKwh * (room.electricity_price || 3500);
-  const totalWater = calcWaterPeople * (room.water_price || 25000);
-  const totalInternet = room.internet_price || 80000;
-  const totalService = room.service_fee || 0;
-  const totalMonthlyCost = room.price + totalElec + totalWater + totalInternet + totalService;
-  const costPerPerson = Math.round(totalMonthlyCost / calcSplitPeople);
+  // Safe checks for conditional renders
+  if (loading) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 space-y-8 animate-pulse">
+        <div className="h-6 w-48 bg-slate-200 rounded-lg" />
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          <div className="lg:col-span-2 space-y-6">
+            <div className="aspect-16/9 bg-slate-200 rounded-3xl" />
+            <div className="h-32 bg-slate-200 rounded-3xl" />
+          </div>
+          <div className="h-96 bg-slate-200 rounded-3xl" />
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="max-w-xl mx-auto px-4 py-20 text-center space-y-4">
+        <div className="w-16 h-16 bg-rose-50 text-rose-600 rounded-3xl flex items-center justify-center mx-auto border border-rose-200 shadow-xs">
+          <AlertTriangle className="w-8 h-8" />
+        </div>
+        <h2 className="text-2xl font-extrabold text-slate-800">Không thể tải thông tin phòng</h2>
+        <p className="text-slate-500 text-sm leading-relaxed">{error}</p>
+        <div className="flex items-center justify-center gap-3 pt-2">
+          <button
+            onClick={loadRoom}
+            className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold shadow-md shadow-emerald-600/20 transition cursor-pointer"
+          >
+            Thử tải lại
+          </button>
+          <Link
+            to="/rooms"
+            className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-sm font-semibold transition"
+          >
+            Xem phòng khác
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (!room) {
+    return (
+      <div className="max-w-xl mx-auto px-4 py-20 text-center space-y-4">
+        <div className="w-16 h-16 bg-amber-50 text-amber-600 rounded-3xl flex items-center justify-center mx-auto border border-amber-200 shadow-xs">
+          <AlertTriangle className="w-8 h-8" />
+        </div>
+        <h2 className="text-2xl font-extrabold text-slate-800">Không tìm thấy phòng trọ</h2>
+        <p className="text-slate-500 text-sm leading-relaxed">
+          Phòng trọ này có thể đã được gỡ xuống hoặc liên kết không chính xác.
+        </p>
+        <Link
+          to="/rooms"
+          className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold inline-block shadow-md shadow-emerald-600/20 transition"
+        >
+          Quay lại danh sách phòng
+        </Link>
+      </div>
+    );
+  }
+
+  // Calculator computations (now room is guaranteed non-null)
+  const roomPrice = Number(room.price) || 0;
+  const elecPrice = Number(room.electricity_price) || 3500;
+  const waterPrice = Number(room.water_price) || 25000;
+  const totalInternet = Number(room.internet_price) || 80000;
+  const totalService = Number(room.service_fee) || 0;
+
+  const totalElec = calcElectricityKwh * elecPrice;
+  const totalWater = calcWaterPeople * waterPrice;
+  const totalMonthlyCost = roomPrice + totalElec + totalWater + totalInternet + totalService;
+  const costPerPerson = Math.round(totalMonthlyCost / (calcSplitPeople || 1));
+
+  const canEdit = Boolean(user && (user.role === 'ADMIN' || user.id === room.owner_id));
+  const currentDisplayImage = selectedImage || displayImages[0];
+  const activeImageIndex = Math.max(0, displayImages.indexOf(currentDisplayImage));
+
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
       {/* Top Breadcrumb */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <Link
           to="/rooms"
           className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-slate-900 transition"
@@ -181,6 +347,15 @@ export const RoomDetailPage: React.FC = () => {
           <ArrowLeft className="w-4 h-4" /> Quay lại danh sách phòng Thái Nguyên
         </Link>
         <div className="flex items-center gap-2">
+          {canEdit && (
+            <button
+              onClick={() => setEditModalOpen(true)}
+              className="px-3.5 py-1.5 rounded-xl border border-emerald-500 text-emerald-800 bg-emerald-50 hover:bg-emerald-100 text-xs font-extrabold flex items-center gap-1.5 transition shadow-xs cursor-pointer"
+            >
+              <Edit className="w-3.5 h-3.5 text-emerald-600" /> Chỉnh sửa bài đăng
+            </button>
+          )}
+
           <button
             onClick={handleShare}
             className="px-3 py-1.5 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-100 text-xs font-semibold flex items-center gap-1.5 transition"
@@ -196,24 +371,33 @@ export const RoomDetailPage: React.FC = () => {
         <div className="lg:col-span-2 space-y-8">
           {/* PHOTO GALLERY */}
           <div className="space-y-3">
-            <div className="aspect-16/9 rounded-3xl overflow-hidden bg-slate-900 shadow-md relative">
+            <div
+              onClick={() => openLightbox(activeImageIndex)}
+              className="aspect-16/9 rounded-3xl overflow-hidden bg-slate-900 shadow-md relative cursor-pointer group"
+            >
               <img
-                src={selectedImage || room.images[0]}
+                src={currentDisplayImage}
                 alt={room.title}
-                className="w-full h-full object-cover"
+                className="w-full h-full object-cover group-hover:scale-102 transition duration-500"
               />
               <div className="absolute top-4 left-4 bg-slate-900/80 backdrop-blur-md text-white text-xs font-semibold px-3 py-1 rounded-xl">
                 {room.district}, Thái Nguyên
               </div>
+              <div className="absolute bottom-4 right-4 bg-slate-900/80 backdrop-blur-md text-white text-xs font-bold px-3 py-1.5 rounded-xl flex items-center gap-1.5 opacity-90 group-hover:opacity-100 transition shadow-md">
+                <Maximize2 className="w-3.5 h-3.5" />
+                <span>Xem toàn màn hình ({displayImages.length} ảnh)</span>
+              </div>
             </div>
-            {room.images && room.images.length > 1 && (
-              <div className="flex gap-2 overflow-x-auto pb-2">
-                {room.images.map((img: string, idx: number) => (
+
+            {displayImages.length > 1 && (
+              <div className="flex gap-2.5 overflow-x-auto pb-2 pt-1">
+                {displayImages.map((img: string, idx: number) => (
                   <button
                     key={idx}
                     onClick={() => setSelectedImage(img)}
-                    className={`w-24 h-18 rounded-2xl overflow-hidden shrink-0 border-2 transition ${
-                      selectedImage === img ? 'border-emerald-600 scale-95 shadow-md' : 'border-transparent opacity-70 hover:opacity-100'
+                    onDoubleClick={() => openLightbox(idx)}
+                    className={`relative w-24 h-18 rounded-2xl overflow-hidden shrink-0 border-2 transition cursor-pointer ${
+                      currentDisplayImage === img ? 'border-emerald-600 scale-95 shadow-md' : 'border-transparent opacity-70 hover:opacity-100'
                     }`}
                   >
                     <img src={img} alt="thumbnail" className="w-full h-full object-cover" />
@@ -283,14 +467,18 @@ export const RoomDetailPage: React.FC = () => {
             {/* Amenities Grid */}
             <div className="pt-4 border-t border-slate-100 space-y-3">
               <h3 className="text-sm font-bold text-slate-900">Tiện nghi phòng trọ:</h3>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs text-slate-700">
-                {room.amenities.map((am: string, i: number) => (
-                  <div key={i} className="flex items-center gap-2 p-2.5 bg-slate-50 rounded-xl border border-slate-100">
-                    <Check className="w-4 h-4 text-emerald-600 shrink-0" />
-                    <span className="capitalize">{am.replace('_', ' ')}</span>
-                  </div>
-                ))}
-              </div>
+              {room.amenities && Array.isArray(room.amenities) && room.amenities.length > 0 ? (
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs text-slate-700">
+                  {room.amenities.map((am: string, i: number) => (
+                    <div key={i} className="flex items-center gap-2 p-2.5 bg-slate-50 rounded-xl border border-slate-100">
+                      <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span className="capitalize">{am.replace('_', ' ')}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-slate-400 italic">Chưa có thông tin tiện nghi chi tiết.</p>
+              )}
             </div>
           </div>
 
@@ -392,7 +580,7 @@ export const RoomDetailPage: React.FC = () => {
           </div>
 
           {/* DISTANCE & TRAVEL TIME TO THAI NGUYEN UNIVERSITIES */}
-          {room.distances && (
+          {room.distances && Array.isArray(room.distances) && room.distances.length > 0 && (
             <div className="bg-white p-6 sm:p-8 rounded-3xl border border-slate-200 shadow-xs space-y-4">
               <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                 <div>
@@ -421,17 +609,19 @@ export const RoomDetailPage: React.FC = () => {
                         </span>
                       </div>
                       <p className="text-[11px] text-slate-500 line-clamp-1">{dist.location_name}</p>
-                      <div className="flex items-center gap-3 pt-1 text-[11px] text-slate-600 font-medium">
-                        <span className="flex items-center gap-1">
-                          <Footprints className="w-3 h-3 text-emerald-600" />
-                          {est.walkingMinutes} phút đi bộ
-                        </span>
-                        <span>·</span>
-                        <span className="flex items-center gap-1">
-                          <Bike className="w-3 h-3 text-blue-600" />
-                          {est.motorbikeMinutes} phút xe máy
-                        </span>
-                      </div>
+                      {est && (
+                        <div className="flex items-center gap-3 pt-1 text-[11px] text-slate-600 font-medium">
+                          <span className="flex items-center gap-1">
+                            <Footprints className="w-3 h-3 text-emerald-600" />
+                            {est.walkingMinutes} phút đi bộ
+                          </span>
+                          <span>·</span>
+                          <span className="flex items-center gap-1">
+                            <Bike className="w-3 h-3 text-blue-600" />
+                            {est.motorbikeMinutes} phút xe máy
+                          </span>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -439,11 +629,157 @@ export const RoomDetailPage: React.FC = () => {
             </div>
           )}
 
-          {/* MAP */}
-          <div className="bg-white p-6 sm:p-8 rounded-3xl border border-slate-200 shadow-xs space-y-4">
-            <h3 className="text-base font-extrabold text-slate-900">Vị trí thực tế trên bản đồ</h3>
-            <LeafletMap rooms={[room]} center={[room.latitude, room.longitude]} zoom={15} height="360px" />
-          </div>
+          {/* GPS INTERACTIVE MAP SECTION */}
+          {(() => {
+            const hasValidGPS = Boolean(
+              room.latitude &&
+              room.longitude &&
+              Number(room.latitude) !== 0 &&
+              Number(room.longitude) !== 0 &&
+              !isNaN(Number(room.latitude)) &&
+              !isNaN(Number(room.longitude))
+            );
+
+            return (
+              <div className="bg-white p-6 sm:p-8 rounded-3xl border border-slate-200 shadow-xs space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
+                        <MapPin className="w-5 h-5 text-emerald-600" />
+                        Vị trí phòng trọ trên bản đồ GPS
+                      </h3>
+                      {hasValidGPS ? (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                          {room.location_verified ? 'Vị trí đã xác thực' : 'Đã có GPS'}
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-700 bg-amber-50 px-2.5 py-0.5 rounded-full border border-amber-200">
+                          <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                          Chưa có GPS chính xác
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {room.address ? `${room.address}, ${room.ward || ''}, ${room.district || 'Thái Nguyên'}` : 'Địa chỉ đang cập nhật'}
+                    </p>
+                  </div>
+
+                  {/* Actions Bar */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    {hasValidGPS && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={handleOpenDirections}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 transition-all cursor-pointer"
+                          title="Mở Google Maps dẫn đường từ vị trí của bạn"
+                        >
+                          <Navigation className="w-3.5 h-3.5" />
+                          <span>Chỉ đường đến phòng</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handleCopyCoords}
+                          className="inline-flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition cursor-pointer"
+                          title="Sao chép tọa độ vĩ độ, kinh độ"
+                        >
+                          {copiedCoords ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 text-emerald-600" />
+                              <span className="text-emerald-700">Đã chép!</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3.5 h-3.5 text-slate-500" />
+                              <span>Tọa độ</span>
+                            </>
+                          )}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handleOpenGoogleMaps}
+                          className="p-2 bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-slate-900 rounded-xl text-xs transition cursor-pointer"
+                          title="Mở trên ứng dụng Google Maps"
+                        >
+                          <ExternalLink className="w-4 h-4" />
+                        </button>
+                      </>
+                    )}
+
+                    {canEdit && (
+                      <button
+                        type="button"
+                        onClick={handleOpenLocationEditor}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-xl text-xs font-semibold transition cursor-pointer"
+                        title="Chỉnh sửa hoặc ghim lại vị trí GPS cho phòng trọ này"
+                      >
+                        <Edit className="w-3.5 h-3.5 text-amber-600" />
+                        <span>{hasValidGPS ? 'Chỉnh sửa GPS' : 'Ghim vị trí'}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Map or GPS Warning */}
+                {hasValidGPS ? (
+                  <div className="space-y-2">
+                    <LeafletMap
+                      rooms={[room]}
+                      center={[Number(room.latitude), Number(room.longitude)]}
+                      zoom={16}
+                      height="380px"
+                    />
+                    <div className="flex flex-wrap items-center justify-between text-[11px] text-slate-500 bg-slate-50 p-2.5 rounded-xl border border-slate-100">
+                      <span>
+                        📍 Tọa độ GPS: <strong>{Number(room.latitude).toFixed(6)}</strong>, <strong>{Number(room.longitude).toFixed(6)}</strong>
+                      </span>
+                      {room.location_updated_at && (
+                        <span>
+                          Cập nhật: {new Date(room.location_updated_at).toLocaleDateString('vi-VN')}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-6 bg-gradient-to-br from-amber-50/80 to-orange-50/50 rounded-2xl border border-amber-200 space-y-3">
+                    <div className="flex items-start gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                        <AlertTriangle className="w-5 h-5" />
+                      </div>
+                      <div className="space-y-1">
+                        <h4 className="text-sm font-bold text-amber-900">
+                          Chủ trọ chưa cập nhật vị trí GPS chính xác
+                        </h4>
+                        <p className="text-xs text-amber-800 leading-relaxed">
+                          Hệ thống không hiển thị vị trí giả định để tránh gây nhầm lẫn đường đi cho người thuê. Bạn có thể xem địa chỉ mô tả: <strong className="font-semibold text-slate-900">{room.address || `${room.ward || ''}, Thái Nguyên`}</strong>.
+                        </p>
+                        <p className="text-[11px] text-amber-700 pt-0.5">
+                          💡 Vui lòng bấm &quot;Liên hệ chủ trọ&quot; qua số điện thoại để được hướng dẫn đón hoặc chỉ đường chi tiết.
+                        </p>
+                      </div>
+                    </div>
+
+                    {canEdit && (
+                      <div className="pt-2 flex items-center justify-end">
+                        <button
+                          type="button"
+                          onClick={handleOpenLocationEditor}
+                          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 transition cursor-pointer flex items-center gap-2"
+                        >
+                          <MapPin className="w-4 h-4" />
+                          <span>Bạn là chủ phòng? Cập nhật vị trí GPS ngay</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* REVIEWS SECTION */}
           <div className="bg-white p-6 sm:p-8 rounded-3xl border border-slate-200 shadow-xs space-y-6">
@@ -560,11 +896,22 @@ export const RoomDetailPage: React.FC = () => {
 
               <button
                 onClick={() => setContactModalOpen(true)}
-                className="w-full py-3 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-2xl text-xs sm:text-sm flex items-center justify-center gap-2 transition"
+                className="w-full py-3 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-2xl text-xs sm:text-sm flex items-center justify-center gap-2 transition cursor-pointer"
               >
                 <Calendar className="w-4 h-4" />
                 Hẹn lịch xem phòng trực tiếp
               </button>
+
+              {/* Owner / Admin direct edit button */}
+              {canEdit && (
+                <button
+                  onClick={() => setEditModalOpen(true)}
+                  className="w-full py-3 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-extrabold rounded-2xl text-xs sm:text-sm flex items-center justify-center gap-2 transition shadow-xs cursor-pointer"
+                >
+                  <Edit className="w-4 h-4 text-emerald-600" />
+                  Chỉnh sửa bài đăng & Quản lý ảnh
+                </button>
+              )}
             </div>
 
             {/* Quick Action buttons */}
@@ -611,6 +958,143 @@ export const RoomDetailPage: React.FC = () => {
             {room.similar_rooms.map((simRoom: Room) => (
               <RoomCard key={simRoom.id} room={simRoom} />
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* FULLSCREEN LIGHTBOX MODAL */}
+      {lightboxOpen && (
+        <div className="fixed inset-0 z-50 bg-black/95 flex flex-col justify-between p-4 sm:p-6 backdrop-blur-md">
+          {/* Lightbox Header */}
+          <div className="flex items-center justify-between text-white shrink-0">
+            <span className="text-xs sm:text-sm font-bold bg-white/10 px-3.5 py-1.5 rounded-xl">
+              Ảnh {lightboxIndex + 1} / {displayImages.length}
+            </span>
+            <button
+              onClick={() => setLightboxOpen(false)}
+              className="p-2 text-white/70 hover:text-white rounded-full hover:bg-white/10 transition cursor-pointer"
+              title="Đóng (Esc)"
+            >
+              <X className="w-6 h-6" />
+            </button>
+          </div>
+
+          {/* Lightbox Main Image & Arrows */}
+          <div className="relative flex-1 flex items-center justify-center my-4 overflow-hidden">
+            {displayImages.length > 1 && (
+              <button
+                onClick={prevLightboxImage}
+                className="absolute left-2 sm:left-4 z-10 p-3 rounded-full bg-white/10 hover:bg-white/20 text-white backdrop-blur-md transition cursor-pointer"
+                title="Ảnh trước (Mũi tên trái)"
+              >
+                <ChevronLeft className="w-6 h-6" />
+              </button>
+            )}
+
+            <img
+              src={displayImages[lightboxIndex]}
+              alt={`Room image ${lightboxIndex + 1}`}
+              className="max-h-[75vh] max-w-full object-contain rounded-2xl shadow-2xl transition duration-300 select-none"
+            />
+
+            {displayImages.length > 1 && (
+              <button
+                onClick={nextLightboxImage}
+                className="absolute right-2 sm:right-4 z-10 p-3 rounded-full bg-white/10 hover:bg-white/20 text-white backdrop-blur-md transition cursor-pointer"
+                title="Ảnh sau (Mũi tên phải)"
+              >
+                <ChevronRight className="w-6 h-6" />
+              </button>
+            )}
+          </div>
+
+          {/* Lightbox Bottom Thumbnails */}
+          {displayImages.length > 1 && (
+            <div className="flex justify-center gap-2 overflow-x-auto py-2 shrink-0">
+              {displayImages.map((img: string, idx: number) => (
+                <button
+                  key={idx}
+                  onClick={() => setLightboxIndex(idx)}
+                  className={`w-16 h-12 rounded-xl overflow-hidden shrink-0 border-2 transition cursor-pointer ${
+                    lightboxIndex === idx
+                      ? 'border-emerald-500 scale-105'
+                      : 'border-transparent opacity-50 hover:opacity-100'
+                  }`}
+                >
+                  <img src={img} alt="thumb" className="w-full h-full object-cover" />
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Edit Room Modal */}
+      {canEdit && (
+        <RoomEditModal
+          room={room}
+          isOpen={editModalOpen}
+          onClose={() => setEditModalOpen(false)}
+          onSaved={(updated) => {
+            setRoom(updated);
+            loadRoom();
+          }}
+        />
+      )}
+
+      {/* Quick GPS Location Editor Modal */}
+      {locationModalOpen && canEdit && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-2xl w-full p-6 space-y-4 shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className="w-9 h-9 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center">
+                  <MapPin className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-slate-900 text-base">
+                    Ghim vị trí phòng trọ trên bản đồ GPS
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Kéo thả ghim, click trực tiếp bản đồ, hoặc bấm GPS của tôi
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setLocationModalOpen(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <RoomLocationPicker
+              initialLatitude={pendingCoords.latitude}
+              initialLongitude={pendingCoords.longitude}
+              addressHint={room.address || room.ward || 'Thái Nguyên'}
+              onChange={(coords) => setPendingCoords(coords)}
+              height="340px"
+            />
+
+            <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setLocationModalOpen(false)}
+                disabled={savingLocation}
+                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 transition"
+              >
+                Hủy bỏ
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveLocation}
+                disabled={savingLocation}
+                className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/20 transition disabled:opacity-50 flex items-center gap-2"
+              >
+                {savingLocation ? 'Đang lưu vị trí...' : 'Lưu vị trí GPS'}
+              </button>
+            </div>
           </div>
         </div>
       )}

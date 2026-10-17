@@ -15,6 +15,7 @@ import {
   ArrowRight,
   ShieldCheck,
   Footprints,
+  MapPinOff,
 } from 'lucide-react';
 import { Room } from '../types';
 import { useCompare } from '../context/CompareContext';
@@ -22,6 +23,7 @@ import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { api } from '../services/api';
 import { estimateTravelTime } from '../utils/travelEstimates';
+import { formatPriceVND } from '../utils/formatPrice';
 
 interface RoomCardProps {
   room: Room;
@@ -81,13 +83,7 @@ export const RoomCard: React.FC<RoomCardProps> = ({
     }
   };
 
-  const formatPrice = (price: number) => {
-    if (price >= 1000000) {
-      const millions = price / 1000000;
-      return `${millions.toLocaleString('vi-VN', { maximumFractionDigits: 1 })} triệu/tháng`;
-    }
-    return `${price.toLocaleString('vi-VN')} đ/tháng`;
-  };
+  const formatPrice = (price: number) => formatPriceVND(price);
 
   const getRoomTypeName = (type: string) => {
     switch (type) {
@@ -106,8 +102,18 @@ export const RoomCard: React.FC<RoomCardProps> = ({
     }
   };
 
+  const hasValidGps =
+    room.latitude !== undefined &&
+    room.latitude !== null &&
+    room.longitude !== undefined &&
+    room.longitude !== null &&
+    !isNaN(Number(room.latitude)) &&
+    !isNaN(Number(room.longitude)) &&
+    Number(room.latitude) !== 0 &&
+    Number(room.longitude) !== 0;
+
   const distVal = room.distance_to_target ?? room.distance_km;
-  const travelEst = distVal !== undefined ? estimateTravelTime(distVal) : null;
+  const travelEst = distVal !== undefined && hasValidGps ? estimateTravelTime(distVal) : null;
 
   return (
     <div className="group bg-white rounded-3xl overflow-hidden border border-slate-200/90 shadow-2xs hover:shadow-xl hover:border-slate-300 transition-all duration-300 flex flex-col justify-between">
@@ -117,6 +123,9 @@ export const RoomCard: React.FC<RoomCardProps> = ({
           <img
             src={room.images[0] || 'https://images.unsplash.com/photo-1522771739844-6a9f6d5f14af?w=800'}
             alt={room.title}
+            onError={(e) => {
+              (e.target as HTMLImageElement).src = 'https://images.unsplash.com/photo-1522771739844-6a9f6d5f14af?w=800';
+            }}
             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
             loading="lazy"
           />
@@ -189,22 +198,34 @@ export const RoomCard: React.FC<RoomCardProps> = ({
         {/* Content Body */}
         <div className="p-4 sm:p-5 space-y-2.5">
           {/* Walking / travel distance kicker */}
-          {travelEst && (
-            <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-800 bg-emerald-50/80 px-2.5 py-1 rounded-xl border border-emerald-200/80 w-fit">
-              <Footprints className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-              <span>
-                {travelEst.walkingMinutes <= 15 ? (
-                  <span>
-                    Khoảng <strong>{travelEst.walkingMinutes} phút đi bộ</strong> đến {targetLocationName || 'trường'} ({travelEst.distanceKm.toFixed(1)} km)
-                  </span>
-                ) : (
-                  <span>
-                    Khoảng <strong>{travelEst.motorbikeMinutes} phút xe máy</strong> đến {targetLocationName || 'trường'} ({travelEst.distanceKm.toFixed(1)} km)
-                  </span>
-                )}
-              </span>
+          {travelEst ? (
+            <div className="flex flex-col gap-0.5 text-xs font-bold text-emerald-900 bg-emerald-50/80 p-2 rounded-xl border border-emerald-200/80 w-fit">
+              <div className="flex items-center gap-1.5">
+                <Footprints className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>
+                  {travelEst.isCentroidMatch ? (
+                    <span>Tọa độ tại điểm mốc {targetLocationName || 'trường'}</span>
+                  ) : travelEst.distanceKm < 0.1 ? (
+                    <span>Sát cổng {targetLocationName || 'trường'} (&lt; 100m đường chim bay)</span>
+                  ) : (
+                    <span>
+                      Bán kính: ~<strong>{travelEst.distanceKm.toFixed(1)} km</strong> (đường chim bay)
+                    </span>
+                  )}
+                </span>
+              </div>
+              {!travelEst.isCentroidMatch && travelEst.distanceKm >= 0.1 && (
+                <div className="text-[11px] font-medium text-emerald-700 pl-5">
+                  Đi đường ước tính: ~{travelEst.estimatedRoadKm} km (~{travelEst.walkingMinutes <= 15 ? `${travelEst.walkingMinutes}p đi bộ` : `${travelEst.motorbikeMinutes}p xe máy`})
+                </div>
+              )}
             </div>
-          )}
+          ) : targetLocationName && !hasValidGps ? (
+            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-amber-800 bg-amber-50 px-2.5 py-1 rounded-xl border border-amber-200/80 w-fit">
+              <MapPinOff className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+              <span>Chưa xác định vị trí chính xác (Chưa có GPS)</span>
+            </div>
+          ) : null}
 
           {/* Title */}
           <Link to={`/rooms/${room.id}`} className="block group-hover:text-emerald-700 transition">

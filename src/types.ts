@@ -30,6 +30,17 @@ export interface Amenity {
   icon: string;
 }
 
+export interface RoomImage {
+  id: string;
+  room_id: string;
+  storage_path?: string;
+  image_url: string;
+  url?: string;
+  is_cover: boolean;
+  sort_order: number;
+  created_at: string;
+}
+
 export interface Room {
   id: string;
   owner_id: string;
@@ -62,8 +73,11 @@ export interface Room {
   contact_count: number;
   amenities: string[];
   images: string[];
+  image_items?: RoomImage[];
   created_at: string;
   updated_at: string;
+  location_verified?: boolean;
+  location_updated_at?: string;
 
   // Dynamically enriched fields
   distance_to_target?: number;

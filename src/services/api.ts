@@ -1,7 +1,7 @@
 /**
  * Frontend API client
  */
-import { Room, LocationItem, Amenity, User, Review, Report, StructuredQuery } from '../types';
+import { Room, RoomImage, LocationItem, Amenity, User, Review, Report, StructuredQuery } from '../types';
 
 const API_BASE = '/api';
 
@@ -66,7 +66,7 @@ export const api = {
   },
 
   // Rooms
-  async getRooms(params: Record<string, any> = {}): Promise<{
+  async getRooms(params: Record<string, any> = {}, signal?: AbortSignal): Promise<{
     data: Room[];
     meta: { total: number; page: number; limit: number; totalPages: number };
     target_location?: LocationItem;
@@ -78,7 +78,7 @@ export const api = {
       }
     });
 
-    const res = await fetch(`${API_BASE}/rooms?${query.toString()}`);
+    const res = await fetch(`${API_BASE}/rooms?${query.toString()}`, { signal });
     return res.json();
   },
 
@@ -129,6 +129,92 @@ export const api = {
     return res.json();
   },
 
+  async patchRoom(id: string, data: Partial<Room>): Promise<Room> {
+    const res = await fetch(`${API_BASE}/rooms/${id}`, {
+      method: 'PATCH',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Không thể cập nhật phòng trọ');
+    }
+    return res.json();
+  },
+
+  async uploadRoomImages(
+    roomId: string,
+    files: File[]
+  ): Promise<{ success: boolean; uploaded: RoomImage[]; images: RoomImage[] }> {
+    const formData = new FormData();
+    files.forEach((file) => {
+      formData.append('images', file);
+    });
+
+    const token = localStorage.getItem('phongtro_tn_token');
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    const res = await fetch(`${API_BASE}/rooms/${roomId}/images`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Lỗi khi tải ảnh lên');
+    }
+    return res.json();
+  },
+
+  async deleteRoomImage(
+    roomId: string,
+    imageId: string
+  ): Promise<{ success: boolean; images: RoomImage[] }> {
+    const res = await fetch(`${API_BASE}/rooms/${roomId}/images/${imageId}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Lỗi khi xóa ảnh phòng trọ');
+    }
+    return res.json();
+  },
+
+  async reorderRoomImages(
+    roomId: string,
+    imageIds: string[]
+  ): Promise<{ success: boolean; images: RoomImage[] }> {
+    const res = await fetch(`${API_BASE}/rooms/${roomId}/images/reorder`, {
+      method: 'PATCH',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ image_ids: imageIds }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Lỗi khi sắp xếp thứ tự ảnh');
+    }
+    return res.json();
+  },
+
+  async setRoomCoverImage(
+    roomId: string,
+    imageId: string
+  ): Promise<{ success: boolean; images: RoomImage[] }> {
+    const res = await fetch(`${API_BASE}/rooms/${roomId}/images/${imageId}/cover`, {
+      method: 'PATCH',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Lỗi khi đặt ảnh đại diện');
+    }
+    return res.json();
+  },
+
   async deleteRoom(id: string) {
     const res = await fetch(`${API_BASE}/rooms/${id}`, {
       method: 'DELETE',
@@ -147,6 +233,7 @@ export const api = {
     reply_text: string;
     structured_query: StructuredQuery;
     rooms: Room[];
+    suggest_rooms?: Room[];
     total_matched: number;
     location_info?: LocationItem;
   }> {
@@ -162,10 +249,23 @@ export const api = {
     return res.json();
   },
 
+  async clearAiChat(sessionId: string): Promise<{ success: boolean; message: string }> {
+    const res = await fetch(`${API_BASE}/ai/chat/${sessionId}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Lỗi khi xóa phiên hội thoại');
+    }
+    return res.json();
+  },
+
   async searchAi(query: string): Promise<{
     structured_query: StructuredQuery;
     reply_text: string;
     rooms: Room[];
+    suggest_rooms?: Room[];
     total_matched: number;
     location_info?: LocationItem;
   }> {
@@ -303,6 +403,39 @@ export const api = {
       headers: getAuthHeaders(),
       body: JSON.stringify({ status }),
     });
+    return res.json();
+  },
+
+  // Map / GPS Location
+  async updateRoomLocation(
+    roomId: string,
+    coords: { latitude: number | null; longitude: number | null }
+  ): Promise<Room> {
+    const res = await fetch(`${API_BASE}/rooms/${roomId}/location`, {
+      method: 'PATCH',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(coords),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Không thể cập nhật vị trí phòng trọ');
+    }
+    return res.json();
+  },
+
+  async searchGeoAddress(query: string): Promise<Array<{
+    name: string;
+    display_name: string;
+    latitude: number;
+    longitude: number;
+    type?: string;
+    source?: 'preset' | 'osm';
+  }>> {
+    if (!query || query.trim().length < 2) return [];
+    const res = await fetch(`${API_BASE}/geo/search?q=${encodeURIComponent(query.trim())}`);
+    if (!res.ok) {
+      return [];
+    }
     return res.json();
   },
 };

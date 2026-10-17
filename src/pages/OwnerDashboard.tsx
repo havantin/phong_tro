@@ -16,6 +16,8 @@ import {
 import { api } from '../services/api';
 import { Room } from '../types';
 import { useAuth } from '../context/AuthContext';
+import { RoomEditModal } from '../components/RoomEditModal';
+import { RoomLocationPicker } from '../components/RoomLocationPicker';
 
 export const OwnerDashboard: React.FC = () => {
   const { user } = useAuth();
@@ -23,6 +25,7 @@ export const OwnerDashboard: React.FC = () => {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingRoom, setEditingRoom] = useState<Room | null>(null);
 
   // Form states
@@ -37,8 +40,8 @@ export const OwnerDashboard: React.FC = () => {
     ward: 'Xã Quyết Thắng',
     street: 'Đường Z115',
     address: '',
-    latitude: 21.5855,
-    longitude: 105.8066,
+    latitude: 0,
+    longitude: 0,
     max_people: 2,
     gender_requirement: 'all',
     deposit: 2000000,
@@ -85,8 +88,8 @@ export const OwnerDashboard: React.FC = () => {
       ward: 'Xã Quyết Thắng',
       street: 'Đường Z115',
       address: '',
-      latitude: 21.5855,
-      longitude: 105.8066,
+      latitude: 0,
+      longitude: 0,
       max_people: 2,
       gender_requirement: 'all',
       deposit: 2000000,
@@ -103,31 +106,7 @@ export const OwnerDashboard: React.FC = () => {
 
   const handleOpenEditModal = (room: Room) => {
     setEditingRoom(room);
-    setFormData({
-      title: room.title,
-      description: room.description,
-      price: room.price,
-      area: room.area,
-      room_type: room.room_type,
-      province: room.province,
-      district: room.district,
-      ward: room.ward,
-      street: room.street,
-      address: room.address,
-      latitude: room.latitude,
-      longitude: room.longitude,
-      max_people: room.max_people,
-      gender_requirement: room.gender_requirement,
-      deposit: room.deposit,
-      electricity_price: room.electricity_price,
-      water_price: room.water_price,
-      internet_price: room.internet_price,
-      service_fee: room.service_fee,
-      amenities: room.amenities,
-      images: room.images,
-    });
-    setFormError('');
-    setIsModalOpen(true);
+    setIsEditModalOpen(true);
   };
 
   const handleSubmitForm = async (e: React.FormEvent) => {
@@ -147,10 +126,26 @@ export const OwnerDashboard: React.FC = () => {
 
     setFormLoading(true);
     try {
+      const hasValidCoords = Boolean(
+        formData.latitude &&
+        formData.longitude &&
+        Number(formData.latitude) !== 0 &&
+        Number(formData.longitude) !== 0 &&
+        !isNaN(Number(formData.latitude)) &&
+        !isNaN(Number(formData.longitude))
+      );
+
+      const payload = {
+        ...formData,
+        latitude: hasValidCoords ? Number(formData.latitude) : null,
+        longitude: hasValidCoords ? Number(formData.longitude) : null,
+        location_verified: hasValidCoords,
+      };
+
       if (editingRoom) {
-        await api.updateRoom(editingRoom.id, formData as Partial<Room>);
+        await api.updateRoom(editingRoom.id, payload as any);
       } else {
-        await api.createRoom(formData as Partial<Room>);
+        await api.createRoom(payload as any);
       }
       setIsModalOpen(false);
       fetchDashboard();
@@ -475,6 +470,31 @@ export const OwnerDashboard: React.FC = () => {
                 />
               </div>
 
+              {/* Định vị phòng trọ trên bản đồ GPS */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-bold text-slate-700">
+                    Vị trí phòng trọ trên bản đồ GPS
+                  </label>
+                  <span className="text-[11px] text-slate-500">
+                    Kéo thả ghim hoặc click trực tiếp
+                  </span>
+                </div>
+                <RoomLocationPicker
+                  initialLatitude={formData.latitude}
+                  initialLongitude={formData.longitude}
+                  addressHint={formData.address || formData.ward || 'Thái Nguyên'}
+                  onChange={({ latitude, longitude }) => {
+                    setFormData((prev) => ({
+                      ...prev,
+                      latitude: latitude ?? 0,
+                      longitude: longitude ?? 0,
+                    }));
+                  }}
+                  height="260px"
+                />
+              </div>
+
               {/* Utility Pricing */}
               <div className="grid grid-cols-3 gap-3">
                 <div>
@@ -549,6 +569,23 @@ export const OwnerDashboard: React.FC = () => {
             </form>
           </div>
         </div>
+      )}
+
+      {/* Modern Room Edit & Image Gallery Modal */}
+      {editingRoom && (
+        <RoomEditModal
+          room={editingRoom}
+          isOpen={isEditModalOpen}
+          onClose={() => {
+            setIsEditModalOpen(false);
+            setEditingRoom(null);
+          }}
+          onSaved={(updated) => {
+            setIsEditModalOpen(false);
+            setEditingRoom(null);
+            fetchDashboard();
+          }}
+        />
       )}
     </div>
   );

@@ -19,6 +19,8 @@ import {
 import { api } from '../services/api';
 import { Room, StructuredQuery } from '../types';
 import { useToast } from '../context/ToastContext';
+import { AiMarkdownRenderer } from './AiMarkdownRenderer';
+import { formatPriceVND } from '../utils/formatPrice';
 
 interface Message {
   id: string;
@@ -26,6 +28,7 @@ interface Message {
   text: string;
   structured_query?: StructuredQuery;
   rooms?: Room[];
+  suggest_rooms?: Room[];
   created_at: string;
   suggested_chips?: string[];
 }
@@ -133,6 +136,44 @@ export const FloatingAiChat: React.FC = () => {
 
   const determineChips = (query: string, replyText: string): string[] => {
     const lower = query.toLowerCase();
+    if (lower.includes('chào') || lower === 'hi' || lower === 'hello') {
+      return [
+        '🏫 Gần trường ICTU dưới 2 triệu',
+        '🏥 Gần ĐH Y Dược Thái Nguyên',
+        '💰 Tôi có 100k thuê được phòng không?',
+        '📋 Thủ tục thuê phòng cần những gì?',
+      ];
+    }
+    if (lower.includes('100k') || lower.includes('ít tiền') || lower.includes('ngân sách')) {
+      return [
+        '👥 Tư vấn phương án ở ghép (share phòng)',
+        '💰 Tìm phòng giá rẻ nhất gần ICTU',
+        '📍 Phòng trọ bình dân dưới 1.5 triệu',
+        '⚡ Chi phí điện nước sinh hoạt',
+      ];
+    }
+    if (lower.includes('buồn') || lower.includes('chán')) {
+      return [
+        '🌿 Tìm phòng yên tĩnh, có ban công thoáng mát',
+        '💡 Gợi ý phòng gần công viên hoặc hồ',
+        '🏫 Xem phòng trọ sinh viên Thái Nguyên',
+      ];
+    }
+    if (lower.includes('thủ tục') || lower.includes('hợp đồng') || lower.includes('tiền cọc')) {
+      return [
+        '⚠️ Cách tránh bẫy lừa đảo thuê phòng',
+        '⚡ Giá điện nước quy định thế nào?',
+        '🔍 Tìm phòng chính chủ không qua môi giới',
+      ];
+    }
+    if (lower.includes('ictu')) {
+      return [
+        '❄️ Có điều hòa và nóng lạnh không?',
+        '💰 Có phòng nào rẻ hơn không?',
+        '⚖️ So sánh 2 phòng vừa tìm',
+        '📍 Tư vấn khu trọ đường Z115',
+      ];
+    }
     if (lower.includes('không tốt') || lower.includes('chưa ưng') || lower.includes('tốt hơn')) {
       return [
         '✨ Gợi ý phòng cao cấp hơn (Full nội thất)',
@@ -141,19 +182,11 @@ export const FloatingAiChat: React.FC = () => {
         '🐱 Cho nuôi thú cưng & giờ tự do',
       ];
     }
-    if (lower.includes('ictu')) {
-      return [
-        '✨ Làm nó tốt hơn / Gợi ý phòng VIP',
-        'Dưới 2 triệu rưỡi thôi',
-        'Phải có điều hòa và máy giặt',
-        'Tư vấn khu trọ đường Z115',
-      ];
-    }
     return [
       '✨ Tôi chưa ưng lắm, hãy làm nó tốt hơn',
-      '💰 Tìm phòng rẻ hơn nữa',
+      '💰 Có phòng nào rẻ hơn nữa không?',
       '❄️ Thêm điều hòa + Nóng lạnh',
-      '📍 Xem vị trí trên bản đồ',
+      '⚖️ So sánh 2 phòng vừa tìm',
     ];
   };
 
@@ -171,15 +204,28 @@ export const FloatingAiChat: React.FC = () => {
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
     setLoading(true);
-    setThinkingStep('AI đang phân tích ý định và ngữ cảnh...');
+
+    const qLower = query.toLowerCase();
+    const isSearchQuery =
+      qLower.includes('tìm') ||
+      qLower.includes('phòng') ||
+      qLower.includes('ictu') ||
+      qLower.includes('triệu') ||
+      qLower.includes('điều hòa');
+
+    setThinkingStep(
+      isSearchQuery
+        ? 'AI đang phân tích ý định và tìm phòng trọ Thái Nguyên...'
+        : 'AI đang suy nghĩ và chuẩn bị câu trả lời...'
+    );
 
     const timer1 = setTimeout(() => {
-      setThinkingStep('Đang truy xuất database phòng trọ Thái Nguyên...');
-    }, 400);
-
-    const timer2 = setTimeout(() => {
-      setThinkingStep('Đang tính khoảng cách GPS Haversine và Smart Match...');
-    }, 800);
+      setThinkingStep(
+        isSearchQuery
+          ? 'Đang tính toán khoảng cách GPS Haversine và đối soát tiêu chuẩn...'
+          : 'AI đang tổng hợp lời khuyên hữu ích...'
+      );
+    }, 450);
 
     try {
       const res = await api.sendAiChat(query, sessionId);
@@ -193,6 +239,7 @@ export const FloatingAiChat: React.FC = () => {
         text: res.reply_text,
         structured_query: res.structured_query,
         rooms: res.rooms,
+        suggest_rooms: res.suggest_rooms || [],
         created_at: new Date().toISOString(),
         suggested_chips: dynamicChips,
       };
@@ -215,18 +262,26 @@ export const FloatingAiChat: React.FC = () => {
       ]);
     } finally {
       clearTimeout(timer1);
-      clearTimeout(timer2);
       setLoading(false);
       setThinkingStep('');
     }
   };
 
-  const handleResetSession = () => {
+  const handleResetSession = async () => {
     if (window.speechSynthesis) {
       window.speechSynthesis.cancel();
       setIsSpeaking(false);
     }
-    setSessionId(`sess-${Date.now()}`);
+    const oldSession = sessionId;
+    const newSessionId = `sess-${Date.now()}`;
+    setSessionId(newSessionId);
+
+    try {
+      await api.clearAiChat(oldSession);
+    } catch {
+      // Ignore background clear error
+    }
+
     setMessages([
       {
         id: `init-${Date.now()}`,
@@ -236,8 +291,8 @@ export const FloatingAiChat: React.FC = () => {
         suggested_chips: [
           'Gần ICTU dưới 2.5 triệu có điều hòa',
           'Gần ĐH Kỹ thuật Công nghiệp (TNUT)',
-          'Gần Samsung Phổ Yên',
-          'Tư vấn đường Z115',
+          'Gần ĐH Y Dược Thái Nguyên',
+          'Tư vấn khu trọ đường Z115',
         ],
       },
     ]);
@@ -328,7 +383,11 @@ export const FloatingAiChat: React.FC = () => {
                         : 'bg-white text-slate-800 border border-slate-200/90 rounded-tl-xs'
                     }`}
                   >
-                    <div className="whitespace-pre-line">{msg.text}</div>
+                    {msg.sender === 'bot' ? (
+                      <AiMarkdownRenderer content={msg.text} />
+                    ) : (
+                      <div className="whitespace-pre-line text-white">{msg.text}</div>
+                    )}
 
                     {msg.sender === 'bot' && (
                       <div className="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px]">
@@ -409,14 +468,14 @@ export const FloatingAiChat: React.FC = () => {
                                 {r.match_score ? `${r.match_score}% phù hợp` : 'Phù hợp'}
                               </span>
                               <span className="font-extrabold text-xs text-emerald-600">
-                                {(r.price / 1000000).toFixed(1)} tr/th
+                                {formatPriceVND(r.price)}
                               </span>
                             </div>
                             <h4 className="font-bold text-xs text-slate-900 truncate">{r.title}</h4>
                             <p className="text-[11px] text-slate-500 truncate flex items-center gap-1 mt-0.5">
                               <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
                               {r.distance_km !== undefined
-                                ? `${r.distance_km.toFixed(1)} km đến trường`
+                                ? (r.distance_km < 0.1 ? '< 100m đến trường (sát cổng)' : `~${r.distance_km.toFixed(1)} km đến trường`)
                                 : r.address}
                             </p>
                           </div>
@@ -425,6 +484,72 @@ export const FloatingAiChat: React.FC = () => {
                               to={`/rooms/${r.id}`}
                               onClick={() => setIsOpen(false)}
                               className="p-1.5 bg-purple-50 hover:bg-purple-600 text-purple-700 hover:text-white rounded-lg transition"
+                              title="Xem chi tiết phòng"
+                            >
+                              <ChevronRight className="w-4 h-4" />
+                            </Link>
+                            <a
+                              href={`tel:${r.owner_phone}`}
+                              className="p-1.5 bg-emerald-50 hover:bg-emerald-600 text-emerald-700 hover:text-white rounded-lg transition"
+                              title="Gọi chủ trọ"
+                            >
+                              <Phone className="w-3.5 h-3.5" />
+                            </a>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Suggested alternative room cards when matched rooms is 0 */}
+                  {(!msg.rooms || msg.rooms.length === 0) && msg.suggest_rooms && msg.suggest_rooms.length > 0 && (
+                    <div className="space-y-2 pt-1">
+                      <div className="flex items-center justify-between text-[11px] font-bold text-amber-800 bg-amber-50 px-2.5 py-1.5 rounded-xl border border-amber-200">
+                        <span className="flex items-center gap-1.5 text-amber-800">
+                          <Sparkles className="w-3.5 h-3.5 text-amber-600" />
+                          Gợi ý phòng có mức giá gần nhất:
+                        </span>
+                        <Link
+                          to="/rooms"
+                          onClick={() => setIsOpen(false)}
+                          className="text-amber-700 hover:underline text-[10px]"
+                        >
+                          Xem tất cả →
+                        </Link>
+                      </div>
+
+                      {msg.suggest_rooms.slice(0, 3).map((r) => (
+                        <div
+                          key={r.id}
+                          className="bg-white p-3 rounded-2xl border border-amber-200/90 shadow-2xs hover:border-amber-400 hover:shadow-md transition-all flex items-center gap-3 group"
+                        >
+                          <img
+                            src={r.images[0]}
+                            alt={r.title}
+                            className="w-16 h-16 rounded-xl object-cover shrink-0 group-hover:scale-105 transition-transform"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between gap-1 mb-0.5">
+                              <span className="text-[10px] font-extrabold px-1.5 py-0.2 rounded-md bg-amber-50 text-amber-700 border border-amber-200">
+                                Gợi ý tham khảo
+                              </span>
+                              <span className="font-extrabold text-xs text-emerald-600">
+                                {formatPriceVND(r.price)}
+                              </span>
+                            </div>
+                            <h4 className="font-bold text-xs text-slate-900 truncate">{r.title}</h4>
+                            <p className="text-[11px] text-slate-500 truncate flex items-center gap-1 mt-0.5">
+                              <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
+                              {r.distance_km !== undefined
+                                ? (r.distance_km < 0.1 ? '< 100m đến trường (sát cổng)' : `~${r.distance_km.toFixed(1)} km đến trường`)
+                                : r.address}
+                            </p>
+                          </div>
+                          <div className="flex flex-col gap-1 shrink-0">
+                            <Link
+                              to={`/rooms/${r.id}`}
+                              onClick={() => setIsOpen(false)}
+                              className="p-1.5 bg-amber-50 hover:bg-amber-600 text-amber-700 hover:text-white rounded-lg transition"
                               title="Xem chi tiết phòng"
                             >
                               <ChevronRight className="w-4 h-4" />
@@ -485,16 +610,22 @@ export const FloatingAiChat: React.FC = () => {
               }}
               className="flex items-center gap-2"
             >
-              <input
-                type="text"
+              <textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
+                rows={1}
                 placeholder={
                   isListening
                     ? 'Đang lắng nghe giọng nói...'
-                    : 'Nhập: Tìm phòng gần ICTU dưới 2.5 triệu...'
+                    : 'Nhắn: Tìm phòng gần ICTU dưới 2.5tr, có điều hòa... (Enter để gửi)'
                 }
-                className="flex-1 py-2 px-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-xs sm:text-sm focus:outline-hidden focus:ring-2 focus:ring-purple-500 focus:bg-white transition"
+                className="flex-1 py-2 px-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-xs sm:text-sm focus:outline-hidden focus:ring-2 focus:ring-purple-500 focus:bg-white transition resize-none max-h-24 leading-normal"
               />
               <button
                 type="button"
@@ -512,6 +643,7 @@ export const FloatingAiChat: React.FC = () => {
                 type="submit"
                 disabled={loading || !input.trim()}
                 className="p-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 disabled:opacity-40 text-white rounded-2xl transition shadow-md shadow-purple-600/30 shrink-0"
+                title="Gửi tin nhắn (Enter)"
               >
                 <Send className="w-4 h-4" />
               </button>

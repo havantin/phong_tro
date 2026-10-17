@@ -1,12 +1,9 @@
-/**
- * Express Server for PhongTro Thai Nguyen
- * Implements REST APIs, Authentication, AI Chatbot with memory context,
- * Haversine formula distance calculations, and mounts Vite in dev mode.
- */
+import path from 'path';
 import express, { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
+import multer from 'multer';
 import {
   ensureDatabaseConnection,
   listLocations,
@@ -22,6 +19,12 @@ import {
   createRoom,
   updateRoom,
   deleteRoom,
+  getRoomImagesByRoom,
+  addRoomImage,
+  deleteRoomImage,
+  reorderRoomImages,
+  setRoomCoverImage,
+  RoomImage,
   listFavoritesForUser,
   createFavorite,
   removeFavorite,
@@ -39,17 +42,39 @@ import {
   saveChatSession,
   appendChatMessage,
   getChatMessages,
+  clearChatSession,
   calculateHaversineDistance,
+  calculateHaversineKm,
+  isValidCoordinate,
+  updateRoomLocation,
 } from './db.js';
-import { executeAiRoomSearch } from './aiService.js';
+import { executeAiRoomSearch, executeChatResponse } from './aiService.js';
+import {
+  uploadRoomImage,
+  deleteRoomImageFromStorage,
+  validateImageFile,
+  MAX_IMAGES_PER_ROOM,
+  MAX_FILE_SIZE,
+} from './storage.js';
 
 dotenv.config();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'thai-nguyen-phongtro-secret-key-2025';
 const app = express();
 
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: MAX_FILE_SIZE,
+    files: MAX_IMAGES_PER_ROOM,
+  },
+});
+
+app.use(express.json({ limit: '20mb' }));
+app.use(express.urlencoded({ extended: true, limit: '20mb' }));
+
+// Serve local uploaded images statically
+app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
 
 interface AuthRequest extends Request {
   user?: {
@@ -268,7 +293,7 @@ app.get('/api/rooms', async (req: Request, res: Response) => {
     }
 
     const nearLocId = req.query.near_location as string;
-    const radius = req.query.radius ? parseFloat(req.query.radius as string) : 5;
+    const radius = req.query.radius ? parseFloat(req.query.radius as string) : 3;
     const locations = await listLocations();
     let targetLoc: any = null;
 
@@ -280,13 +305,20 @@ app.get('/api/rooms', async (req: Request, res: Response) => {
 
     let enriched = result.map((room) => {
       let dist: number | undefined = undefined;
-      if (targetLoc) {
-        dist = calculateHaversineDistance(targetLoc.latitude, targetLoc.longitude, room.latitude, room.longitude);
+      if (
+        targetLoc &&
+        isValidCoordinate(targetLoc.latitude, targetLoc.longitude) &&
+        isValidCoordinate(room.latitude, room.longitude)
+      ) {
+        dist = calculateHaversineKm(targetLoc.latitude, targetLoc.longitude, room.latitude, room.longitude);
       }
       return { ...room, distance_to_target: dist };
     });
 
-    if (targetLoc && req.query.strict_radius === 'true') {
+    // STRICT RADIUS FILTERING:
+    // If a target location is specified, filter strictly: distanceKm <= radius
+    // Rooms without valid GPS coordinates are strictly excluded from the radius filter.
+    if (targetLoc) {
       enriched = enriched.filter((r) => r.distance_to_target !== undefined && r.distance_to_target <= radius);
     }
 
@@ -296,7 +328,7 @@ app.get('/api/rooms', async (req: Request, res: Response) => {
     } else if (sort === 'price_desc') {
       enriched.sort((a, b) => b.price - a.price);
     } else if (sort === 'nearest' && targetLoc) {
-      enriched.sort((a, b) => (a.distance_to_target || 999) - (b.distance_to_target || 999));
+      enriched.sort((a, b) => (a.distance_to_target ?? 999) - (b.distance_to_target ?? 999));
     } else {
       enriched.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
     }
@@ -328,13 +360,19 @@ app.get('/api/rooms/:id', async (req: Request, res: Response) => {
     await incrementRoomView(room.id);
 
     const locations = await listLocations();
-    const distances = locations.map((loc) => ({
-      location_id: loc.id,
-      location_name: loc.name,
-      short_name: loc.short_name,
-      type: loc.type,
-      distance_km: calculateHaversineDistance(loc.latitude, loc.longitude, room.latitude, room.longitude),
-    })).sort((a, b) => a.distance_km - b.distance_km);
+    const hasValidCoords = isValidCoordinate(room.latitude, room.longitude);
+    const distances = hasValidCoords
+      ? locations
+          .filter((loc) => isValidCoordinate(loc.latitude, loc.longitude))
+          .map((loc) => ({
+            location_id: loc.id,
+            location_name: loc.name,
+            short_name: loc.short_name,
+            type: loc.type,
+            distance_km: calculateHaversineKm(loc.latitude, loc.longitude, room.latitude, room.longitude),
+          }))
+          .sort((a, b) => a.distance_km - b.distance_km)
+      : [];
 
     const reviews = await getReviewByRoom(room.id);
     const avgRating = reviews.length > 0
@@ -400,8 +438,8 @@ app.post('/api/rooms', requireAuth, requireRole(['OWNER', 'ADMIN']), async (req:
       ward: ward || 'Xã Quyết Thắng',
       street: street || '',
       address,
-      latitude: latitude ? Number(latitude) : 21.5855 + (Math.random() - 0.5) * 0.02,
-      longitude: longitude ? Number(longitude) : 105.8066 + (Math.random() - 0.5) * 0.02,
+      latitude: isValidCoordinate(latitude, longitude) ? Number(latitude) : undefined,
+      longitude: isValidCoordinate(latitude, longitude) ? Number(longitude) : undefined,
       max_people: Number(max_people),
       gender_requirement,
       deposit: deposit ? Number(deposit) : Number(price),
@@ -423,24 +461,322 @@ app.post('/api/rooms', requireAuth, requireRole(['OWNER', 'ADMIN']), async (req:
   }
 });
 
-app.put('/api/rooms/:id', requireAuth, requireRole(['OWNER', 'ADMIN']), async (req: AuthRequest, res: Response) => {
-  const room = await getRoomById(req.params.id);
-  if (!room) {
-    return res.status(404).json({ error: 'Không tìm thấy phòng trọ' });
-  }
+// Update room endpoint - supports PATCH and PUT
+const handleUpdateRoom = async (req: AuthRequest, res: Response) => {
+  try {
+    const room = await getRoomById(req.params.id);
+    if (!room) {
+      return res.status(404).json({ error: 'Không tìm thấy phòng trọ' });
+    }
 
-  if (req.user?.role !== 'ADMIN' && room.owner_id !== req.user?.id) {
-    return res.status(403).json({ error: 'Bạn không có quyền sửa phòng này' });
-  }
+    if (req.user?.role !== 'ADMIN' && room.owner_id !== req.user?.id) {
+      return res.status(403).json({ error: 'Bạn không có quyền chỉnh sửa phòng này' });
+    }
 
-  const updates = req.body;
-  if (updates.province && updates.province !== 'Thái Nguyên') {
-    return res.status(400).json({ error: 'Chỉ chấp nhận phòng tại Tỉnh Thái Nguyên' });
-  }
+    const updates = req.body;
+    if (updates.province && updates.province !== 'Thái Nguyên') {
+      return res.status(400).json({ error: 'Chỉ chấp nhận bài đăng tại Tỉnh Thái Nguyên' });
+    }
 
-  const updated = await updateRoom(req.params.id, { ...updates, updated_at: new Date().toISOString() } as any);
-  return res.json(updated);
+    const updated = await updateRoom(req.params.id, updates);
+    return res.json(updated);
+  } catch (error) {
+    console.error('Update room error:', error);
+    return res.status(500).json({ error: 'Lỗi cập nhật thông tin phòng trọ' });
+  }
+};
+
+app.patch('/api/rooms/:id', requireAuth, handleUpdateRoom);
+app.put('/api/rooms/:id', requireAuth, handleUpdateRoom);
+
+// Dedicated Room Location PATCH API (for owner or admin)
+app.patch('/api/rooms/:id/location', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const roomId = req.params.id;
+    const room = await getRoomById(roomId);
+    if (!room) {
+      return res.status(404).json({ error: 'Không tìm thấy bài đăng phòng trọ' });
+    }
+
+    if (req.user?.role !== 'ADMIN' && room.owner_id !== req.user?.id) {
+      return res.status(403).json({ error: 'Bạn không có quyền cập nhật vị trí cho phòng này' });
+    }
+
+    const { latitude, longitude } = req.body;
+
+    // Reset location case
+    if (latitude === null && longitude === null) {
+      const updated = await updateRoomLocation(roomId, null, null, false);
+      return res.json({ success: true, message: 'Đã xóa vị trí GPS của bài đăng', room: updated });
+    }
+
+    const latNum = Number(latitude);
+    const lngNum = Number(longitude);
+
+    if (isNaN(latNum) || isNaN(lngNum)) {
+      return res.status(400).json({ error: 'Tọa độ latitude và longitude phải là số thực hợp lệ' });
+    }
+
+    if (latNum < -90 || latNum > 90 || lngNum < -180 || lngNum > 180) {
+      return res.status(400).json({ error: 'Tọa độ nằm ngoài phạm vi chuẩn WGS84' });
+    }
+
+    const isThaiNguyenBounds = latNum >= 21.2 && latNum <= 22.0 && lngNum >= 105.5 && lngNum <= 106.3;
+
+    const updated = await updateRoomLocation(roomId, latNum, lngNum, true);
+    return res.json({
+      success: true,
+      message: 'Cập nhật vị trí GPS thành công',
+      room: updated,
+      warning: !isThaiNguyenBounds
+        ? 'Tọa độ vừa chọn có vẻ nằm ngoài ranh giới Tỉnh Thái Nguyên (vĩ độ 21.2-22.0, kinh độ 105.5-106.3). Bạn hãy kiểm tra lại nếu cần.'
+        : undefined,
+    });
+  } catch (error) {
+    console.error('Update room location error:', error);
+    return res.status(500).json({ error: 'Lỗi máy chủ khi cập nhật vị trí phòng' });
+  }
 });
+
+// Geocoding Proxy & Local Cache Endpoint (OpenStreetMap Nominatim compliant)
+const geoSearchCache = new Map<string, { timestamp: number; results: any[] }>();
+
+app.get('/api/geo/search', async (req: Request, res: Response) => {
+  try {
+    const rawQuery = (req.query.q as string || '').trim();
+    if (!rawQuery || rawQuery.length < 2) {
+      return res.json({ results: [] });
+    }
+
+    const cacheKey = rawQuery.toLowerCase();
+    const cached = geoSearchCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < 3600000) {
+      return res.json({ results: cached.results });
+    }
+
+    const thaiNguyenPresets = [
+      { name: 'Đường Z115, Xã Quyết Thắng, TP. Thái Nguyên', lat: 21.5855, lon: 105.8066, type: 'street' },
+      { name: 'Đại học Công nghệ Thông tin & Truyền thông (ICTU), Đường Z115', lat: 21.5855, lon: 105.8066, type: 'university' },
+      { name: 'Đại học Kỹ thuật Công nghiệp Thái Nguyên (TNUT), Số 666 Đường 3/2', lat: 21.5542, lon: 105.8458, type: 'university' },
+      { name: 'Đại học Y - Dược Thái Nguyên (TUMP), Số 284 Lương Ngọc Quyến', lat: 21.5960, lon: 105.8320, type: 'university' },
+      { name: 'Đại học Sư phạm Thái Nguyên (TNUE), Số 20 Lương Ngọc Quyến', lat: 21.5975, lon: 105.8272, type: 'university' },
+      { name: 'Đại học Khoa học Thái Nguyên (TNUS), Phường Tân Thịnh', lat: 21.5820, lon: 105.8190, type: 'university' },
+      { name: 'Đại học Nông Lâm Thái Nguyên (TUAF), Xã Quyết Thắng', lat: 21.5880, lon: 105.8240, type: 'university' },
+      { name: 'Đại học Kinh tế & QTKD (TUEBA), Phường Thịnh Đán', lat: 21.5790, lon: 105.8125, type: 'university' },
+      { name: 'Đường Quang Trung, Phường Thịnh Đán, TP. Thái Nguyên', lat: 21.5780, lon: 105.8080, type: 'street' },
+      { name: 'Đường Lương Ngọc Quyến, TP. Thái Nguyên', lat: 21.5940, lon: 105.8330, type: 'street' },
+      { name: 'Đường Hoàng Văn Thụ, TP. Thái Nguyên', lat: 21.5965, lon: 105.8400, type: 'street' },
+      { name: 'Bến xe khách Trung tâm Thái Nguyên', lat: 21.5830, lon: 105.8420, type: 'transport' },
+      { name: 'Bệnh viện A Thái Nguyên, Đường Quang Trung', lat: 21.5780, lon: 105.8080, type: 'hospital' },
+      { name: 'Bệnh viện Trung ương Thái Nguyên, Số 479 Lương Ngọc Quyến', lat: 21.5920, lon: 105.8360, type: 'hospital' },
+      { name: 'Khu công nghiệp Điềm Thụy, Huyện Phú Bình, Thái Nguyên', lat: 21.4650, lon: 105.9320, type: 'industrial' },
+      { name: 'Khu công nghiệp Sông Công I & II, TP. Sông Công', lat: 21.4880, lon: 105.8450, type: 'industrial' },
+      { name: 'KCN Yên Bình (Tổ hợp Samsung Electronics SEVT), TP. Phổ Yên', lat: 21.4420, lon: 105.8890, type: 'industrial' },
+    ];
+
+    const matchedPresets = thaiNguyenPresets.filter(p =>
+      p.name.toLowerCase().includes(rawQuery.toLowerCase())
+    );
+
+    let remoteResults: any[] = [];
+    try {
+      const nominatimUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(`${rawQuery}, Thái Nguyên, Việt Nam`)}&limit=5&addressdetails=1&countrycodes=vn`;
+      const response = await fetch(nominatimUrl, {
+        headers: {
+          'User-Agent': 'PhongTroThaiNguyen/2.0 (contact: admin@phongtrothainguyen.vn)',
+          'Accept-Language': 'vi,en;q=0.9',
+        },
+      });
+      if (response.ok) {
+        const data = await response.json();
+        remoteResults = data.map((item: any) => ({
+          name: item.display_name,
+          lat: parseFloat(item.lat),
+          lon: parseFloat(item.lon),
+          type: item.type || 'place',
+        }));
+      }
+    } catch (err: any) {
+      console.warn('[Geocoding] Nominatim request note:', err?.message);
+    }
+
+    const merged = [...matchedPresets, ...remoteResults].filter(
+      (item, idx, self) =>
+        idx === self.findIndex(t => Math.abs(t.lat - item.lat) < 0.001 && Math.abs(t.lon - item.lon) < 0.001)
+    );
+
+    geoSearchCache.set(cacheKey, { timestamp: Date.now(), results: merged });
+    return res.json({ results: merged });
+  } catch (err) {
+    console.error('Geocoding search error:', err);
+    return res.status(500).json({ error: 'Lỗi tra cứu địa chỉ trên bản đồ' });
+  }
+});
+
+// ==========================================
+// ROOM IMAGES MANAGEMENT APIS
+// ==========================================
+
+// Upload images to a room (Supabase Storage / local fallback)
+app.post(
+  '/api/rooms/:id/images',
+  requireAuth,
+  upload.array('images', MAX_IMAGES_PER_ROOM),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const room = await getRoomById(req.params.id);
+      if (!room) {
+        return res.status(404).json({ error: 'Không tìm thấy bài đăng phòng trọ' });
+      }
+
+      if (req.user?.role !== 'ADMIN' && room.owner_id !== req.user?.id) {
+        return res.status(403).json({ error: 'Bạn không có quyền tải ảnh cho bài đăng này' });
+      }
+
+      const files = (req.files as Express.Multer.File[]) || [];
+      if (!files.length) {
+        return res.status(400).json({ error: 'Vui lòng chọn ít nhất một file ảnh để tải lên' });
+      }
+
+      const existingImages = await getRoomImagesByRoom(room.id);
+      if (existingImages.length + files.length > MAX_IMAGES_PER_ROOM) {
+        return res.status(400).json({
+          error: `Mỗi phòng trọ chỉ được tối đa ${MAX_IMAGES_PER_ROOM} ảnh. Phòng hiện có ${existingImages.length} ảnh, không thể tải thêm ${files.length} ảnh.`,
+        });
+      }
+
+      // Pre-validate all files
+      for (const file of files) {
+        const check = validateImageFile(file);
+        if (!check.valid) {
+          return res.status(400).json({ error: check.error });
+        }
+      }
+
+      const uploadedRecords: RoomImage[] = [];
+      const uploadedStoragePaths: string[] = [];
+
+      try {
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          const { storagePath, publicUrl } = await uploadRoomImage(room.owner_id, room.id, file);
+          uploadedStoragePaths.push(storagePath);
+
+          // If room had no images, the very first uploaded image becomes the cover
+          const isCover = existingImages.length === 0 && i === 0;
+          const record = await addRoomImage({
+            room_id: room.id,
+            image_url: publicUrl,
+            storage_path: storagePath,
+            is_cover: isCover,
+            sort_order: existingImages.length + i,
+          });
+          uploadedRecords.push(record);
+        }
+      } catch (uploadError) {
+        // Rollback uploaded files from storage if DB or upload failed halfway
+        for (const p of uploadedStoragePaths) {
+          await deleteRoomImageFromStorage(p);
+        }
+        throw uploadError;
+      }
+
+      const allImages = await getRoomImagesByRoom(room.id);
+      return res.status(201).json({
+        success: true,
+        uploaded: uploadedRecords,
+        images: allImages,
+      });
+    } catch (error: any) {
+      console.error('Upload room images error:', error);
+      return res.status(500).json({ error: error.message || 'Lỗi tải ảnh lên bài đăng' });
+    }
+  }
+);
+
+// Delete a room image
+app.delete('/api/rooms/:id/images/:imageId', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const room = await getRoomById(req.params.id);
+    if (!room) {
+      return res.status(404).json({ error: 'Không tìm thấy phòng trọ' });
+    }
+
+    if (req.user?.role !== 'ADMIN' && room.owner_id !== req.user?.id) {
+      return res.status(403).json({ error: 'Bạn không có quyền xóa ảnh của phòng này' });
+    }
+
+    // Delete from DB first
+    const result = await deleteRoomImage(req.params.imageId, room.id);
+    if (!result.success) {
+      return res.status(404).json({ error: 'Không tìm thấy ảnh cần xóa' });
+    }
+
+    // Only after DB confirms deletion, remove file from storage
+    if (result.storage_path) {
+      await deleteRoomImageFromStorage(result.storage_path);
+    }
+
+    const remainingImages = await getRoomImagesByRoom(room.id);
+    return res.json({ success: true, images: remainingImages });
+  } catch (error) {
+    console.error('Delete room image error:', error);
+    return res.status(500).json({ error: 'Lỗi khi xóa ảnh phòng trọ' });
+  }
+});
+
+// Reorder room images
+app.patch('/api/rooms/:id/images/reorder', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const room = await getRoomById(req.params.id);
+    if (!room) {
+      return res.status(404).json({ error: 'Không tìm thấy bài đăng phòng trọ' });
+    }
+
+    if (req.user?.role !== 'ADMIN' && room.owner_id !== req.user?.id) {
+      return res.status(403).json({ error: 'Bạn không có quyền sắp xếp ảnh của phòng này' });
+    }
+
+    const { image_ids } = req.body;
+    if (!Array.isArray(image_ids)) {
+      return res.status(400).json({ error: 'Danh sách image_ids không hợp lệ' });
+    }
+
+    const updatedImages = await reorderRoomImages(room.id, image_ids);
+    return res.json({ success: true, images: updatedImages });
+  } catch (error) {
+    console.error('Reorder images error:', error);
+    return res.status(500).json({ error: 'Lỗi sắp xếp thứ tự ảnh phòng trọ' });
+  }
+});
+
+// Set cover / primary image (supports both /:imageId/cover and /cover)
+const handleSetCover = async (req: AuthRequest, res: Response) => {
+  try {
+    const room = await getRoomById(req.params.id);
+    if (!room) {
+      return res.status(404).json({ error: 'Không tìm thấy bài đăng phòng trọ' });
+    }
+
+    if (req.user?.role !== 'ADMIN' && room.owner_id !== req.user?.id) {
+      return res.status(403).json({ error: 'Bạn không có quyền đổi ảnh đại diện bài đăng' });
+    }
+
+    const imageId = req.params.imageId || req.body.image_id;
+    if (!imageId) {
+      return res.status(400).json({ error: 'Vui lòng cung cấp mã ảnh muốn đặt làm ảnh đại diện' });
+    }
+
+    const updatedImages = await setRoomCoverImage(room.id, imageId);
+    return res.json({ success: true, images: updatedImages });
+  } catch (error) {
+    console.error('Set cover image error:', error);
+    return res.status(500).json({ error: 'Lỗi khi đặt ảnh đại diện' });
+  }
+};
+
+app.patch('/api/rooms/:id/images/:imageId/cover', requireAuth, handleSetCover);
+app.patch('/api/rooms/:id/images/cover', requireAuth, handleSetCover);
 
 app.delete('/api/rooms/:id', requireAuth, requireRole(['OWNER', 'ADMIN']), async (req: AuthRequest, res: Response) => {
   const room = await getRoomById(req.params.id);
@@ -482,51 +818,73 @@ app.post('/api/ai/chat', async (req: AuthRequest, res: Response) => {
 
     const existingMessages = await getChatMessages(session.id);
     session.messages = existingMessages;
-    session.messages.push({
+
+    // Convert past messages to multi-turn conversation history for LLM
+    const conversationHistory = existingMessages.slice(-10).map((m) => ({
+      role: (m.sender === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+      content: m.text,
+    }));
+
+    // Record user message
+    const userMsg = {
       id: `msg-${Date.now()}-u`,
-      sender: 'user',
+      sender: 'user' as const,
       text: message,
       created_at: new Date().toISOString(),
-    });
+    };
+    session.messages.push(userMsg);
+    await appendChatMessage(session.id, userMsg);
 
-    await appendChatMessage(session.id, {
-      id: `msg-${Date.now()}-u`,
-      sender: 'user',
-      text: message,
-      created_at: new Date().toISOString(),
-    });
+    // Execute chat response with intent classification & conversational intelligence
+    const chatResult = await executeChatResponse(message, session.context, conversationHistory);
 
-    const searchResult = await executeAiRoomSearch(message, session.context);
-
+    // Preserve search context and last found rooms across turns
     session.context = {
       ...session.context,
-      ...searchResult.structured_query,
+      structured_query: chatResult.structured_query,
+      last_rooms: chatResult.last_rooms || session.context?.last_rooms || [],
     };
     session.updated_at = new Date().toISOString();
     await saveChatSession(session);
 
+    // Record bot response message
     const botMsg = {
       id: `msg-${Date.now()}-b`,
       sender: 'bot' as const,
-      text: searchResult.reply_text,
-      structured_query: searchResult.structured_query,
-      matched_rooms: searchResult.rooms,
+      text: chatResult.reply_text,
+      structured_query: chatResult.structured_query,
+      matched_rooms: chatResult.rooms,
       created_at: new Date().toISOString(),
     };
     await appendChatMessage(session.id, botMsg);
 
     return res.json({
       session_id: session.id,
-      reply_text: searchResult.reply_text,
-      structured_query: searchResult.structured_query,
-      rooms: searchResult.rooms,
-      total_matched: searchResult.total_matched,
-      location_info: searchResult.location_info,
+      reply_text: chatResult.reply_text,
+      structured_query: chatResult.structured_query,
+      rooms: chatResult.rooms,
+      total_matched: chatResult.total_matched,
+      suggest_rooms: (chatResult as any).suggest_rooms || [],
+      location_info: chatResult.location_info,
       context: session.context,
+      intent: chatResult.intent,
     });
   } catch (error) {
     console.error('Error in AI Chat endpoint:', error);
     return res.status(500).json({ error: 'Lỗi xử lý AI Chatbot' });
+  }
+});
+
+app.delete('/api/ai/chat/:session_id', async (req: Request, res: Response) => {
+  try {
+    const { session_id } = req.params;
+    if (session_id) {
+      await clearChatSession(session_id);
+    }
+    return res.json({ success: true, message: 'Đã làm mới phiên hội thoại AI' });
+  } catch (error) {
+    console.error('Error clearing chat session:', error);
+    return res.status(500).json({ error: 'Không thể xóa phiên hội thoại' });
   }
 });
 
