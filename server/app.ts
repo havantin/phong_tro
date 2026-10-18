@@ -47,12 +47,15 @@ import {
   calculateHaversineKm,
   isValidCoordinate,
   updateRoomLocation,
+  getDatabaseConnectionString,
+  parseSanitizedDbInfo,
 } from './db.js';
-import { executeAiRoomSearch, executeChatResponse } from './aiService.js';
+import { executeAiRoomSearch, executeChatResponse, getGeminiApiKey } from './aiService.js';
 import {
   uploadRoomImage,
   deleteRoomImageFromStorage,
   validateImageFile,
+  isSupabaseStorageConfigured,
   MAX_IMAGES_PER_ROOM,
   MAX_FILE_SIZE,
 } from './storage.js';
@@ -97,7 +100,7 @@ let dbInitPromise: Promise<void> | null = null;
 async function ensureDbReady() {
   if (!dbInitPromise) {
     dbInitPromise = ensureDatabaseConnection().catch((err) => {
-      console.error('[DB] ensureDatabaseConnection failed:', err);
+      console.error('[DB] ensureDatabaseConnection failed:', err?.message);
       dbInitPromise = null;
       throw err;
     });
@@ -105,48 +108,84 @@ async function ensureDbReady() {
   return dbInitPromise;
 }
 
+// Global DB guard middleware for all /api routes except /api/health
 app.use(async (req: Request, res: Response, next: NextFunction) => {
-  if (process.env.DATABASE_URL && req.url.startsWith('/api') && req.url !== '/api/health') {
+  // Allow health check and root without blocking
+  if (req.url === '/api/health' || req.url === '/api/health/' || req.url === '/' || req.url === '/api') {
+    return next();
+  }
+
+  // Intercept all /api calls
+  if (req.url.startsWith('/api')) {
     try {
       await ensureDbReady();
+      next();
     } catch (err: any) {
-      console.error('[DB] Connection error during request handling:', err?.message);
+      console.error(`[DB Guard] Request ${req.method} ${req.url} blocked: ${err?.message}`);
+      return res.status(503).json({
+        error: 'Cơ sở dữ liệu PostgreSQL chưa sẵn sàng hoặc kết nối thất bại.',
+        details: err?.message,
+        hint: 'Vui lòng kiểm tra biến môi trường DATABASE_URL trong Vercel Settings -> Environment Variables.',
+        status: 503,
+      });
     }
+  } else {
+    next();
   }
-  next();
 });
 
-// Health check endpoint
+// Health check endpoint - reflects true real-time database, storage, and AI status
 app.get('/api/health', async (req: Request, res: Response) => {
-  try {
-    const isDbConfigured = Boolean(process.env.DATABASE_URL);
-    let dbConnected = false;
-    if (isDbConfigured) {
-      try {
-        await ensureDbReady();
-        dbConnected = true;
-      } catch (e) {
-        dbConnected = false;
-      }
-    }
-    const isStorageConfigured = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY);
-    const isAiConfigured = Boolean(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GENAI_API_KEY);
+  const { connString, source } = getDatabaseConnectionString();
+  const dbInfo = parseSanitizedDbInfo(connString, source);
+  const storageConfigured = isSupabaseStorageConfigured();
+  const aiKey = getGeminiApiKey();
+  const aiConfigured = Boolean(aiKey && aiKey !== 'MY_GEMINI_API_KEY');
 
-    return res.json({
-      status: dbConnected ? 'healthy' : (isDbConfigured ? 'connecting' : 'no_database_url'),
-      app: 'PhongTro Thai Nguyen API',
-      scope: 'Tỉnh Thái Nguyên',
-      database: 'PostgreSQL (Supabase)',
-      db_connected: dbConnected,
-      storage_configured: isStorageConfigured,
-      ai_configured: isAiConfigured,
-      environment: process.env.NODE_ENV || 'production',
-      vercel: Boolean(process.env.VERCEL),
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error: any) {
-    return res.status(500).json({ status: 'error', error: error?.message });
+  let dbConnected = false;
+  let dbError: string | null = null;
+
+  if (!connString) {
+    dbError = 'DATABASE_URL chưa được cấu hình trong Environment Variables của Vercel';
+  } else if (process.env.VERCEL && dbInfo.isLocal) {
+    dbError = `DATABASE_URL đang trỏ tới host cục bộ "${dbInfo.host}". Môi trường Vercel Cloud Serverless không thể kết nối tới localhost.`;
+  } else {
+    try {
+      await ensureDbReady();
+      dbConnected = true;
+    } catch (err: any) {
+      dbConnected = false;
+      dbError = err?.message || 'Không thể kết nối tới cơ sở dữ liệu PostgreSQL';
+    }
   }
+
+  const isHealthy = dbConnected;
+
+  const responseBody = {
+    status: isHealthy ? 'healthy' : 'unhealthy',
+    app: 'PhongTro Thai Nguyen API',
+    scope: 'Tỉnh Thái Nguyên',
+    database: 'PostgreSQL (Supabase)',
+    db_connected: dbConnected,
+    db_host: dbInfo.host || 'chưa cấu hình',
+    db_port: dbInfo.port,
+    db_name: dbInfo.database,
+    db_source: dbInfo.source,
+    ...(dbError ? { db_error: dbError } : {}),
+    ...(dbInfo.isLocal && process.env.VERCEL
+      ? {
+          diagnostic:
+            'CẢNH BÁO: DATABASE_URL trên Vercel đang trỏ tới localhost/127.0.0.1. Cần cấu hình connection string của Supabase Cloud.',
+        }
+      : {}),
+    storage_configured: storageConfigured,
+    ai_configured: aiConfigured,
+    environment: process.env.NODE_ENV || 'production',
+    vercel: Boolean(process.env.VERCEL),
+    timestamp: new Date().toISOString(),
+  };
+
+  return res.status(isHealthy ? 200 : 503).json(responseBody);
 });
 
 // Serve local uploaded images statically (fallback for local development)

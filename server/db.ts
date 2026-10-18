@@ -170,54 +170,213 @@ export const db = {
   contacts: [] as ContactInquiry[],
 };
 
-const connString = (process.env.DATABASE_URL || '').trim();
-const isLocalDb = !connString || connString.includes('localhost') || connString.includes('127.0.0.1');
+export function getDatabaseConnectionString(): { connString: string; source: string } {
+  const candidates: Array<[string, string | undefined]> = [
+    ['DATABASE_URL', process.env.DATABASE_URL],
+    ['POSTGRES_URL', process.env.POSTGRES_URL],
+    ['POSTGRES_PRISMA_URL', process.env.POSTGRES_PRISMA_URL],
+    ['SUPABASE_DATABASE_URL', process.env.SUPABASE_DATABASE_URL],
+    ['POSTGRES_URL_NON_POOLING', process.env.POSTGRES_URL_NON_POOLING],
+  ];
 
+  for (const [name, val] of candidates) {
+    if (val && typeof val === 'string' && val.trim().length > 0) {
+      let cleaned = val.trim();
+      // Strip outer quotes if user accidentally pasted with "..." or '...' in Vercel UI
+      if (
+        (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+        (cleaned.startsWith("'") && cleaned.endsWith("'"))
+      ) {
+        cleaned = cleaned.slice(1, -1).trim();
+      }
+      // Strip variable prefix if user pasted "DATABASE_URL=..."
+      if (cleaned.startsWith(`${name}=`)) {
+        cleaned = cleaned.replace(new RegExp(`^${name}=`), '').trim();
+        if (
+          (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+          (cleaned.startsWith("'") && cleaned.endsWith("'"))
+        ) {
+          cleaned = cleaned.slice(1, -1).trim();
+        }
+      }
+      if (cleaned.length > 0) {
+        return { connString: cleaned, source: name };
+      }
+    }
+  }
+
+  // Fallback to separate POSTGRES_* environment variables if available
+  if (process.env.POSTGRES_HOST && process.env.POSTGRES_USER) {
+    const user = process.env.POSTGRES_USER;
+    const password = encodeURIComponent(process.env.POSTGRES_PASSWORD || '');
+    const host = process.env.POSTGRES_HOST;
+    const port = process.env.POSTGRES_PORT || '5432';
+    const database = process.env.POSTGRES_DATABASE || 'postgres';
+    return {
+      connString: `postgresql://${user}:${password}@${host}:${port}/${database}?sslmode=require`,
+      source: 'POSTGRES_HOST/USER/PASSWORD',
+    };
+  }
+
+  return { connString: '', source: 'none' };
+}
+
+export interface SanitizedDbInfo {
+  host: string;
+  port: number;
+  user: string;
+  database: string;
+  isLocal: boolean;
+  ssl: boolean;
+  source: string;
+}
+
+export function parseSanitizedDbInfo(connStr: string, source: string): SanitizedDbInfo {
+  if (!connStr) {
+    return {
+      host: '',
+      port: 5432,
+      user: '',
+      database: '',
+      isLocal: false,
+      ssl: false,
+      source,
+    };
+  }
+
+  try {
+    // Extract part after last @ (handles passwords containing '@')
+    const lastAtIndex = connStr.lastIndexOf('@');
+    let hostAndPort = '';
+    let dbPart = '';
+
+    if (lastAtIndex !== -1) {
+      const rest = connStr.substring(lastAtIndex + 1);
+      const slashIndex = rest.indexOf('/');
+      if (slashIndex !== -1) {
+        hostAndPort = rest.substring(0, slashIndex);
+        dbPart = rest.substring(slashIndex + 1).split('?')[0];
+      } else {
+        hostAndPort = rest.split('?')[0];
+      }
+    } else {
+      // No '@' present in string
+      const protoIndex = connStr.indexOf('://');
+      const withoutProto = protoIndex !== -1 ? connStr.substring(protoIndex + 3) : connStr;
+      hostAndPort = withoutProto.split('/')[0].split('?')[0];
+    }
+
+    // Extract username from before last '@'
+    let user = '';
+    const beforeLastAt = lastAtIndex !== -1 ? connStr.substring(0, lastAtIndex) : '';
+    const protoIndex = beforeLastAt.indexOf('://');
+    const userPass = protoIndex !== -1 ? beforeLastAt.substring(protoIndex + 3) : beforeLastAt;
+    const colonIndex = userPass.indexOf(':');
+    user = colonIndex !== -1 ? userPass.substring(0, colonIndex) : userPass;
+
+    let [host, portStr] = hostAndPort.split(':');
+    host = (host || '').trim();
+    const port = portStr ? parseInt(portStr, 10) : 5432;
+    const isLocal = !host || ['localhost', '127.0.0.1', '::1'].includes(host.toLowerCase());
+
+    return {
+      host: host || (isLocal ? '127.0.0.1' : 'unknown'),
+      port: isNaN(port) ? 5432 : port,
+      user: user || '',
+      database: dbPart || 'postgres',
+      isLocal,
+      ssl: !isLocal,
+      source,
+    };
+  } catch {
+    return {
+      host: 'parse_error',
+      port: 5432,
+      user: '',
+      database: '',
+      isLocal: false,
+      ssl: false,
+      source,
+    };
+  }
+}
+
+const { connString: activeConnString, source: activeSource } = getDatabaseConnectionString();
+const activeDbInfo = parseSanitizedDbInfo(activeConnString, activeSource);
+const isVercelRuntime = Boolean(process.env.VERCEL);
+
+// In Vercel serverless: max 2 connections to stay well within Supabase pooler limits
 export const pool = new pg.Pool({
-  connectionString: connString || undefined,
-  max: process.env.DB_POOL_MAX ? parseInt(process.env.DB_POOL_MAX, 10) : (process.env.VERCEL ? 3 : 10),
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000,
-  ssl: isLocalDb ? false : { rejectUnauthorized: false },
+  connectionString: activeConnString || undefined,
+  max: process.env.DB_POOL_MAX ? parseInt(process.env.DB_POOL_MAX, 10) : (isVercelRuntime ? 2 : 10),
+  idleTimeoutMillis: 15000,
+  connectionTimeoutMillis: 5000, // 5s timeout to prevent API hangs
+  ssl: activeDbInfo.isLocal ? false : { rejectUnauthorized: false },
 });
 
 pool.on('error', (err) => {
-  console.error('Unexpected PostgreSQL client error', err);
+  console.error('[Database Pool Error]:', err?.message);
 });
 
+let isDatabaseInitialized = false;
+let isSchemaMigrated = false;
+
 export async function ensureDatabaseConnection(): Promise<void> {
-  if (!connString && !process.env.DATABASE_URL) {
-    throw new Error('DATABASE_URL is missing. Please set DATABASE_URL in Vercel Environment Variables or your .env file.');
+  const { connString, source } = getDatabaseConnectionString();
+  const isVercel = Boolean(process.env.VERCEL);
+  const isProd = process.env.NODE_ENV === 'production';
+
+  if (!connString) {
+    const errorMsg = isVercel
+      ? 'DATABASE_URL chưa được cấu hình trong Environment Variables của Vercel. Vui lòng vào Vercel Dashboard -> Settings -> Environment Variables và thêm biến DATABASE_URL trỏ tới PostgreSQL Supabase.'
+      : 'DATABASE_URL is missing. Please set DATABASE_URL in your .env file.';
+    throw new Error(errorMsg);
+  }
+
+  const dbInfo = parseSanitizedDbInfo(connString, source);
+
+  if ((isVercel || isProd) && dbInfo.isLocal) {
+    throw new Error(
+      `Cấu hình DATABASE_URL không hợp lệ trên môi trường Vercel (Host: "${dbInfo.host}"). Môi trường Cloud Serverless không thể kết nối tới localhost (127.0.0.1:5432). Vui lòng cập nhật DATABASE_URL trên Vercel bằng chuỗi kết nối Supabase Cloud (aws-0-ap-northeast-2.pooler.supabase.com hoặc db.<ref>.supabase.co).`
+    );
+  }
+
+  if (isDatabaseInitialized) {
+    return;
   }
 
   try {
     const result = await pool.query('SELECT NOW() AS now');
-    console.log('✅ PostgreSQL connected successfully:', result.rows[0].now);
+    console.log(`✅ [Database] PostgreSQL connected successfully to ${dbInfo.host}:${dbInfo.port}/${dbInfo.database}:`, result.rows[0].now);
 
-    // Auto-migrate room_images columns if needed
-    try {
-      await pool.query(`
-        ALTER TABLE room_images ADD COLUMN IF NOT EXISTS storage_path VARCHAR(500);
-        ALTER TABLE room_images ADD COLUMN IF NOT EXISTS image_url VARCHAR(500);
-        ALTER TABLE room_images ADD COLUMN IF NOT EXISTS is_cover BOOLEAN DEFAULT false;
-        ALTER TABLE room_images ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 0;
-        UPDATE room_images SET image_url = url WHERE image_url IS NULL AND url IS NOT NULL;
-        UPDATE room_images SET is_cover = is_primary WHERE is_cover IS NULL AND is_primary IS NOT NULL;
-        UPDATE room_images SET url = image_url WHERE url IS NULL AND image_url IS NOT NULL;
-        UPDATE room_images SET is_primary = is_cover WHERE is_primary IS NULL AND is_cover IS NOT NULL;
-        ALTER TABLE rooms ALTER COLUMN latitude DROP NOT NULL;
-        ALTER TABLE rooms ALTER COLUMN longitude DROP NOT NULL;
-        ALTER TABLE rooms ADD COLUMN IF NOT EXISTS location_verified BOOLEAN DEFAULT false;
-        ALTER TABLE rooms ADD COLUMN IF NOT EXISTS location_updated_at TIMESTAMPTZ;
-      `);
-    } catch (migErr) {
-      console.warn('⚠️ Non-fatal migration notice for schema upgrade:', migErr);
+    // Auto-migrate room_images columns once per container lifetime
+    if (!isSchemaMigrated) {
+      try {
+        await pool.query(`
+          ALTER TABLE room_images ADD COLUMN IF NOT EXISTS storage_path VARCHAR(500);
+          ALTER TABLE room_images ADD COLUMN IF NOT EXISTS image_url VARCHAR(500);
+          ALTER TABLE room_images ADD COLUMN IF NOT EXISTS is_cover BOOLEAN DEFAULT false;
+          ALTER TABLE room_images ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 0;
+          UPDATE room_images SET image_url = url WHERE image_url IS NULL AND url IS NOT NULL;
+          UPDATE room_images SET is_cover = is_primary WHERE is_cover IS NULL AND is_primary IS NOT NULL;
+          UPDATE room_images SET url = image_url WHERE url IS NULL AND image_url IS NOT NULL;
+          UPDATE room_images SET is_primary = is_cover WHERE is_primary IS NULL AND is_cover IS NOT NULL;
+          ALTER TABLE rooms ALTER COLUMN latitude DROP NOT NULL;
+          ALTER TABLE rooms ALTER COLUMN longitude DROP NOT NULL;
+          ALTER TABLE rooms ADD COLUMN IF NOT EXISTS location_verified BOOLEAN DEFAULT false;
+          ALTER TABLE rooms ADD COLUMN IF NOT EXISTS location_updated_at TIMESTAMPTZ;
+        `);
+        isSchemaMigrated = true;
+      } catch (migErr: any) {
+        console.warn('⚠️ [Database] Non-fatal schema migration notice:', migErr?.message);
+        isSchemaMigrated = true;
+      }
     }
 
     await refreshStaticData();
-  } catch (error) {
-    console.error('❌ PostgreSQL connection failed. Check DATABASE_URL and database availability.');
-    console.error(error);
+    isDatabaseInitialized = true;
+  } catch (error: any) {
+    console.error(`❌ [Database] PostgreSQL connection failed to ${dbInfo.host}:${dbInfo.port}:`, error?.message);
     throw error;
   }
 }
